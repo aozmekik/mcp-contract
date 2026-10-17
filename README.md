@@ -43,8 +43,8 @@ break clients written against it.
 - **Library API** for Vitest, Jest or `node:test`: `snapshotServer()`, `diffSnapshots()`,
   `expectNoBreakingChanges()`.
 - **Composite GitHub Action** in this repository (not published on the Marketplace).
-- Spawned servers are always cleaned up: on success, timeout, crash, a server that ignores
-  `SIGTERM`, or Ctrl-C.
+- Spawned servers are cleaned up on success, timeout, crash, Ctrl-C, and even when the server
+  ignores stdin EOF and `SIGTERM` (each case has a test).
 
 ## Install
 
