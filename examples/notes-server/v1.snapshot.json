@@ -1,0 +1,308 @@
+{
+  "capabilities": {
+    "prompts": {
+      "listChanged": true
+    },
+    "resources": {
+      "listChanged": true
+    },
+    "tools": {
+      "listChanged": true
+    }
+  },
+  "formatVersion": 1,
+  "instructions": "Search before creating a note to avoid duplicates.",
+  "prompts": [
+    {
+      "arguments": [
+        {
+          "name": "id",
+          "required": true
+        },
+        {
+          "name": "style",
+          "required": false
+        }
+      ],
+      "description": "Asks the model to summarize one note.",
+      "name": "summarize_note",
+      "title": "Summarize a note"
+    }
+  ],
+  "protocol": {
+    "era": "modern",
+    "version": "2026-07-28"
+  },
+  "resourceTemplates": [
+    {
+      "description": "One note as Markdown.",
+      "mimeType": "text/markdown",
+      "name": "note",
+      "title": "Note",
+      "uriTemplate": "notes://note/{id}"
+    }
+  ],
+  "resources": [
+    {
+      "description": "Ids and titles of all notes.",
+      "mimeType": "application/json",
+      "name": "index",
+      "title": "Note index",
+      "uri": "notes://index"
+    }
+  ],
+  "server": {
+    "name": "notes",
+    "version": "1.0.0"
+  },
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Stores a new note and returns its id.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "title"
+        ],
+        "type": "object"
+      },
+      "name": "create_note",
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "title": "Create note"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "description": "Deletes a note permanently.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "delete_note",
+      "title": "Delete note"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Exports every note in the requested format.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "destination": {
+            "oneOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "file",
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "format": {
+            "enum": [
+              "markdown",
+              "json"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "destination",
+          "format"
+        ],
+        "type": "object"
+      },
+      "name": "export_notes",
+      "title": "Export notes"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "description": "Returns one note by id.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "pattern": "^n_[0-9]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "get_note",
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "id",
+          "tags",
+          "title"
+        ],
+        "type": "object"
+      },
+      "title": "Get note"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "description": "Full-text search over all notes.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "description": "Words to look for",
+            "minLength": 1,
+            "type": "string"
+          },
+          "sort": {
+            "enum": [
+              "relevance",
+              "recent"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_notes",
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "results": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "score": {
+                  "type": "number"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "score",
+                "title"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "total": {
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "results",
+          "total"
+        ],
+        "type": "object"
+      },
+      "title": "Search notes"
+    }
+  ]
+}

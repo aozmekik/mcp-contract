@@ -1,0 +1,46 @@
+# Fixture tool calls for the notes example server.
+# Run: mcp-contract test examples/notes-server/scenarios.yaml
+# The server section is used unless --stdio or --url is given; its cwd
+# defaults to this file's directory.
+server:
+  command: node
+  args: [v1.ts]
+
+scenarios:
+  - name: search finds the seeded notes
+    tool: search_notes
+    arguments: { query: protocol, limit: 5 }
+    expect:
+      select:
+        $.structuredContent.total: { $gte: 2 }
+        $.structuredContent.results[*].id: { $regex: '^n_[0-9]+$' }
+        $.structuredContent.results[0].title: Model Context Protocol
+        $.content[0].type: text
+
+  - name: create_note returns the new id
+    tool: create_note
+    arguments: { title: Groceries, body: 'milk, eggs' }
+    expect:
+      result:
+        structuredContent: { id: { $regex: '^n_[0-9]+$' } }
+
+  - name: unknown note ids are tool errors, not protocol errors
+    tool: get_note
+    arguments: { id: n_999 }
+    expect:
+      isError: true
+      select:
+        $.content[0].text: { $regex: 'not found', $flags: i }
+
+  - name: empty queries are rejected
+    tool: search_notes
+    arguments: { query: '' }
+    expect:
+      isError: true
+
+  - name: unknown tools are protocol errors
+    tool: rename_note
+    arguments: { id: n_1 }
+    expect:
+      error:
+        code: -32602
