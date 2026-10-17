@@ -66,7 +66,13 @@ function describeBranch(branch: JsonValue): string {
     return `object {${shown.join(', ')}${names.length > 3 ? ', ...' : ''}}`;
   }
   const types = declaredTypes(branch);
-  return types !== undefined && types.size > 0 ? [...types].join('|') : 'schema';
+  if (types !== undefined && types.size > 0) {
+    return [...types].join('|');
+  }
+  const keywords = Object.keys(branch);
+  return keywords.length === 0
+    ? 'any value'
+    : `{${keywords.slice(0, 3).join(', ')}${keywords.length > 3 ? ', ...' : ''}}`;
 }
 
 function describeBranches(branches: readonly JsonValue[]): string {
@@ -120,7 +126,7 @@ function matchEquivalent(
   return { pairs, oldRest, newRest };
 }
 
-function isPureUnion(schema: JsonObject, keyword: UnionKeyword): boolean {
+function isPureUnion(schema: JsonObject, keyword: UnionKeyword | 'allOf'): boolean {
   return Object.keys(schema).every(
     (key) => key === keyword || ANNOTATION_KEYWORDS.has(key) || STRUCTURAL_KEYWORDS.has(key),
   );
@@ -377,8 +383,42 @@ export function compareUnionKeyword(
 
 /** Compares `allOf`: added subschemas narrow, removed ones widen, a single changed one is compared in detail. */
 export function compareAllOf(ctx: Context, o: JsonObject, n: JsonObject, path: string): void {
-  const before = branchesOf(o, 'allOf') ?? [];
-  const after = branchesOf(n, 'allOf') ?? [];
+  compareConjunction(ctx, branchesOf(o, 'allOf') ?? [], branchesOf(n, 'allOf') ?? [], path);
+}
+
+/**
+ * Handles a schema turning into (or out of) a pure `allOf`, for example when a
+ * `$ref` gains constraint keywords beside it, by treating the plain side as a
+ * one-member `allOf`.
+ */
+export function liftAllOf(ctx: Context, o: JsonObject, n: JsonObject, path: string): boolean {
+  const oldHas = Object.hasOwn(o, 'allOf');
+  const newHas = Object.hasOwn(n, 'allOf');
+  if (oldHas === newHas) {
+    return false;
+  }
+  const composite = oldHas ? o : n;
+  const plain = oldHas ? n : o;
+  if (!isPureUnion(composite, 'allOf') || hasCombinator(plain)) {
+    return false;
+  }
+  compareAnnotations(ctx, o, n, path);
+  const lifted = [withoutAnnotations(plain)];
+  compareConjunction(
+    ctx,
+    oldHas ? (branchesOf(o, 'allOf') ?? []) : lifted,
+    newHas ? (branchesOf(n, 'allOf') ?? []) : lifted,
+    path,
+  );
+  return true;
+}
+
+function compareConjunction(
+  ctx: Context,
+  before: readonly JsonValue[],
+  after: readonly JsonValue[],
+  path: string,
+): void {
   if (before.length === 0 && after.length === 0) {
     return;
   }

@@ -14,19 +14,20 @@ import {
 } from '../../schema/keywords.ts';
 import type { SchemaDirection } from '../model.ts';
 import { compareAnnotations } from './annotations.ts';
-import { compareAllOf, compareUnionKeyword, liftUnion } from './composition.ts';
+import { compareAllOf, compareUnionKeyword, liftAllOf, liftUnion } from './composition.ts';
 import {
   describeChange,
   emit,
   equivalent,
   get,
+  identity,
   isSchema,
   type Context,
   type SchemaChange,
   type Step,
 } from './context.ts';
 import { lookupRef, resolve } from './refs.ts';
-import { childScope } from './scope.ts';
+import { childScope, scopeKey } from './scope.ts';
 import {
   compareEnums,
   compareNumbers,
@@ -89,23 +90,6 @@ const HANDLED_KEYWORDS: ReadonlySet<string> = new Set([
   'uniqueItems',
 ]);
 
-const identities = new WeakMap<object, number>();
-let nextIdentity = 0;
-
-/** Stable identity of a schema node, used to recognise pairs already on the stack. */
-function identity(value: JsonValue): string {
-  if (typeof value !== 'object' || value === null) {
-    return `v${JSON.stringify(value)}`;
-  }
-  let id = identities.get(value);
-  if (id === undefined) {
-    nextIdentity += 1;
-    id = nextIdentity;
-    identities.set(value, id);
-  }
-  return `o${id}`;
-}
-
 const refsMemo = new WeakMap<object, readonly string[]>();
 
 /** Every `$ref` inside `value`; a `$dynamicRef` yields a marker that is never stable. */
@@ -165,17 +149,6 @@ function refsStable(ctx: Context, value: JsonValue): boolean {
   return true;
 }
 
-const scopeKeys = new WeakMap<readonly JsonValue[], string>();
-
-function scopeKey(scope: readonly JsonValue[]): string {
-  let key = scopeKeys.get(scope);
-  if (key === undefined) {
-    key = scope.map(identity).sort().join(',');
-    scopeKeys.set(scope, key);
-  }
-  return key;
-}
-
 function compareNodes(
   ctx: Context,
   oldRaw: JsonValue,
@@ -188,7 +161,13 @@ function compareNodes(
     return;
   }
   const saved = ctx.scope;
-  ctx.scope = childScope(saved, ctx.oldRoot, step);
+  const cacheKey = `${scopeKey(saved, ctx.oldRoot)}|${JSON.stringify(step)}`;
+  let next = ctx.scopes.get(cacheKey);
+  if (next === undefined) {
+    next = childScope(saved, ctx.oldRoot, step);
+    ctx.scopes.set(cacheKey, next);
+  }
+  ctx.scope = next;
   try {
     compareAtLocation(ctx, oldRaw, newRaw, path);
   } finally {
@@ -208,7 +187,7 @@ function compareAtLocation(ctx: Context, oldRaw: JsonValue, newRaw: JsonValue, p
   // pair of $ref targets are tracked, so a recursive definition is unrolled at
   // most once. Keys include the scope because the A1 rule depends on it; there
   // are finitely many scopes, so recursion still terminates.
-  const scope = scopeKey(ctx.scope);
+  const scope = scopeKey(ctx.scope, ctx.oldRoot);
   const rawKey = `${identity(oldRaw)}|${identity(newRaw)}|${scope}`;
   if (ctx.stack.has(rawKey)) {
     return;
@@ -271,7 +250,7 @@ function compareResolved(
   const o: JsonObject = oldValue === true ? {} : oldValue;
   const n: JsonObject = newValue === true ? {} : newValue;
 
-  if (liftUnion(ctx, o, n, path)) {
+  if (liftUnion(ctx, o, n, path) || liftAllOf(ctx, o, n, path)) {
     return;
   }
   compareAnnotations(ctx, o, n, path);
@@ -407,6 +386,7 @@ export function diffSchemas(
     newRoot: newSchema,
     stack: new Set(),
     stableRefs: new Map(),
+    scopes: new Map(),
     budget: { remaining: maxSteps, exhausted: false },
     out: [],
     scope: [oldSchema],

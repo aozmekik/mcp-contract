@@ -11,7 +11,7 @@
  * it descends into alternatives.
  */
 import { isJsonObject, type JsonObject, type JsonValue } from '../../core/json.ts';
-import { get, type Step } from './context.ts';
+import { get, identity, type Step } from './context.ts';
 import { resolve } from './refs.ts';
 
 /** What the old schema allows at one location, as far as A1 is concerned. */
@@ -81,6 +81,22 @@ function expand(scope: readonly JsonValue[], root: JsonValue): Expanded {
 
 function nonEmptyObject(value: JsonValue | undefined): boolean {
   return isJsonObject(value) && Object.keys(value).length > 0;
+}
+
+const scopeKeys = new WeakMap<readonly JsonValue[], string>();
+
+/**
+ * Identifies a scope by the subschemas it expands to, so two routes to the same
+ * location (for example through a recursive reference) get the same key.
+ */
+export function scopeKey(scope: readonly JsonValue[], root: JsonValue): string {
+  let key = scopeKeys.get(scope);
+  if (key === undefined) {
+    const { nodes, complete } = expand(scope, root);
+    key = `${complete ? '' : '?'}${nodes.map(identity).sort().join(',')}`;
+    scopeKeys.set(scope, key);
+  }
+  return key;
 }
 
 const declaredMemo = new WeakMap<readonly JsonValue[], DeclaredProperties>();

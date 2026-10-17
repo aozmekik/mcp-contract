@@ -74,11 +74,51 @@ function pickAnnotations(schema: JsonObject): JsonObject {
   return result;
 }
 
+/** Keywords that only have their meaning together, inside one schema object. */
+const INTERACTING_GROUPS: readonly (readonly string[])[] = [
+  ['properties', 'patternProperties', 'additionalProperties', 'unevaluatedProperties'],
+  [
+    'items',
+    'prefixItems',
+    'additionalItems',
+    'unevaluatedItems',
+    'contains',
+    'minContains',
+    'maxContains',
+  ],
+  ['if', 'then', 'else'],
+  ['minimum', 'exclusiveMinimum'],
+  ['maximum', 'exclusiveMaximum'],
+];
+
+/**
+ * `{$ref: X, ...siblings}` means X and siblings both apply. When they share no
+ * keyword and split no interacting keyword group, a single object with both
+ * keyword sets means exactly the same, and gives far more precise diffs than
+ * an `allOf`.
+ */
+function mergeable(target: JsonValue, siblings: JsonObject): target is JsonObject | true {
+  if (target === true) {
+    return true;
+  }
+  if (!isJsonObject(target) || typeof target.$ref === 'string') {
+    return false;
+  }
+  if (Object.keys(siblings).some((key) => Object.hasOwn(target, key))) {
+    return false;
+  }
+  return INTERACTING_GROUPS.every(
+    (group) =>
+      !group.some((key) => Object.hasOwn(target, key)) ||
+      !group.some((key) => Object.hasOwn(siblings, key)),
+  );
+}
+
 /**
  * Follows `$ref` chains. Annotations written next to a `$ref` (typically a
  * `description`) are kept and win over the target's; constraint keywords next
- * to a `$ref` are combined with the target as an implicit `allOf`, which is
- * what JSON Schema 2020-12 specifies.
+ * to a `$ref` apply together with the target, as JSON Schema 2020-12
+ * specifies: merged into one object when that is exact, otherwise as `allOf`.
  */
 export function resolve(raw: JsonValue, root: JsonValue): Lookup {
   let current = raw;
@@ -102,7 +142,10 @@ export function resolve(raw: JsonValue, root: JsonValue): Lookup {
     }
     annotations = { ...pickAnnotations(current), ...annotations };
     if (Object.keys(siblings).length > 0) {
-      return { ok: true, value: { allOf: [target.value, siblings], ...annotations } };
+      const value = mergeable(target.value, siblings)
+        ? { ...(target.value === true ? {} : target.value), ...siblings, ...annotations }
+        : { allOf: [target.value, siblings], ...annotations };
+      return { ok: true, value };
     }
     current = target.value;
   }

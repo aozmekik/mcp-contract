@@ -62,6 +62,8 @@ export interface Context {
   readonly budget: { remaining: number; exhausted: boolean };
   /** Memo: does this reference point at the same definition, transitively, in both schemas? */
   readonly stableRefs: Map<string, boolean>;
+  /** Memo: child scopes by parent scope key and step, so equal scopes share one array. */
+  readonly scopes: Map<string, readonly JsonValue[]>;
   /** Findings collected so far; swapped out by {@link scratch}. */
   out: Finding[];
   /**
@@ -178,6 +180,23 @@ export function compatible(
   return scratch(ctx, () => {
     ctx.compare(a, b, path, step);
   }).every((finding) => finding.severity === 'non-breaking');
+}
+
+const identities = new WeakMap<object, number>();
+let nextIdentity = 0;
+
+/** Stable identity of a schema node, used to recognise pairs already on the stack. */
+export function identity(value: JsonValue): string {
+  if (typeof value !== 'object' || value === null) {
+    return `v${JSON.stringify(value)}`;
+  }
+  let id = identities.get(value);
+  if (id === undefined) {
+    nextIdentity += 1;
+    id = nextIdentity;
+    identities.set(value, id);
+  }
+  return `o${id}`;
 }
 
 /** True for the two shapes a JSON Schema can take: an object or a boolean. */
