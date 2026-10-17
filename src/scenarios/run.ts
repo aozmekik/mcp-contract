@@ -102,8 +102,10 @@ function evaluate(scenario: Scenario, outcome: Outcome): string[] {
     }
     for (const node of nodes) {
       failures.push(
-        ...matchValue(node.value, expected, node.path).map(
-          (m) => `${selector}: at ${m.path}: ${m.reason}`,
+        ...matchValue(node.value, expected, node.path).map((m) =>
+          m.path === selector
+            ? `${selector}: ${m.reason}`
+            : `${selector}: at ${m.path}: ${m.reason}`,
         ),
       );
     }

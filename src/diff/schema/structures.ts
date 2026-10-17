@@ -13,8 +13,9 @@ import {
   type JsonObject,
   type JsonValue,
 } from '../../core/json.ts';
-import { emit, equivalent, get, propertyPath, type Context } from './context.ts';
+import { emit, equivalent, get, isSchema, propertyPath, type Context } from './context.ts';
 import { compareCounts } from './scalars.ts';
+import { declaredInScope } from './scope.ts';
 
 interface ArrayShape {
   readonly prefix: readonly JsonValue[];
@@ -41,9 +42,10 @@ export function compareArrays(ctx: Context, o: JsonObject, n: JsonObject, path: 
       before.prefix[index] ?? before.rest,
       after.prefix[index] ?? after.rest,
       `${path}[${index}]`,
+      { kind: 'items', index },
     );
   }
-  ctx.compare(before.rest, after.rest, `${path}[*]`);
+  ctx.compare(before.rest, after.rest, `${path}[*]`, { kind: 'items', index: undefined });
   compareCounts(ctx, o, n, path, ['minItems', 'maxItems']);
   const wasUnique = get(o, 'uniqueItems') === true;
   const isUnique = get(n, 'uniqueItems') === true;
@@ -101,7 +103,11 @@ function equivalentMaps(ctx: Context, a: JsonObject, b: JsonObject, path: string
   return [...keys].every((key) => {
     const left = get(a, key);
     const right = get(b, key);
-    return left !== undefined && right !== undefined && equivalent(ctx, left, right, path);
+    return (
+      left !== undefined &&
+      right !== undefined &&
+      equivalent(ctx, left, right, path, { kind: 'additional' })
+    );
   });
 }
 
@@ -142,7 +148,7 @@ function addedProperty(ctx: Context, change: PropertyChange, oldAdditional: Json
   const kind = additionalKind(oldAdditional);
   if (kind === 'schema') {
     // The key used to be validated by additionalProperties: compare against that.
-    ctx.compare(oldAdditional, schema, path);
+    ctx.compare(oldAdditional, schema, path, { kind: 'property', key });
   }
   if (isRequired && !wasRequired) {
     emit(ctx, 'narrow', 'required-property-added', path, `new required property \`${key}\``, {
@@ -160,11 +166,21 @@ function addedProperty(ctx: Context, change: PropertyChange, oldAdditional: Json
       `property \`${key}\` is now declared explicitly`,
     );
   } else if (ctx.direction === 'input') {
-    // Assumption A1: clients only send declared properties.
-    emit(ctx, 'widen', 'property-added', path, `new optional property \`${key}\``, {
-      reason: 'existing clients do not send it, so they are unaffected',
-      severity: 'non-breaking',
-    });
+    // Assumption A1: clients only send properties the old schema declares at
+    // this location, in this node or in any other subschema that applies here.
+    const declared = declaredInScope(ctx.scope, ctx.oldRoot);
+    if (declared.open || declared.keys.has(key)) {
+      emit(ctx, 'unknown', 'property-added', path, `new property \`${key}\``, {
+        reason: declared.open
+          ? 'the old schema also accepts undeclared properties here, so clients may already send it'
+          : 'another part of the old schema declares it here, so clients may already send it',
+      });
+    } else {
+      emit(ctx, 'widen', 'property-added', path, `new optional property \`${key}\``, {
+        reason: 'existing clients do not send it, so they are unaffected',
+        severity: 'non-breaking',
+      });
+    }
   } else {
     // Assumption A2: clients ignore result fields they do not know.
     emit(ctx, 'widen', 'property-added', path, `results may include the new field \`${key}\``, {
@@ -195,7 +211,7 @@ function removedProperty(ctx: Context, change: PropertyChange, newAdditional: Js
         reason: 'requests that include it are still accepted, but the server may ignore it',
       });
     } else {
-      ctx.compare(schema, newAdditional, path);
+      ctx.compare(schema, newAdditional, path, { kind: 'property', key });
       emit(
         ctx,
         'annotation',
@@ -214,7 +230,7 @@ function compareAdditional(ctx: Context, before: JsonValue, after: JsonValue, pa
   const oldKind = additionalKind(before);
   const newKind = additionalKind(after);
   if (oldKind === 'schema' || newKind === 'schema') {
-    ctx.compare(before, after, `${path}.*`);
+    ctx.compare(before, after, `${path}.*`, { kind: 'additional' });
     return;
   }
   if (oldKind === 'any' && newKind === 'none') {
@@ -275,10 +291,14 @@ export function compareObjects(ctx: Context, o: JsonObject, n: JsonObject, path:
     const wasRequired = before.required.has(key);
     const isRequired = after.required.has(key);
     if (oldProperty !== undefined && newProperty !== undefined) {
-      ctx.compare(oldProperty, newProperty, keyPath);
+      ctx.compare(oldProperty, newProperty, keyPath, { kind: 'property', key });
       comparePresence(ctx, key, keyPath, wasRequired, isRequired);
     } else if (oldProperty === undefined && newProperty === undefined) {
       comparePresence(ctx, key, keyPath, wasRequired, isRequired);
+    } else if (!isSchema(newProperty ?? oldProperty ?? true)) {
+      emit(ctx, 'unknown', 'invalid-schema', keyPath, `property \`${key}\` changed`, {
+        reason: 'its schema is not a valid JSON Schema (expected an object or a boolean)',
+      });
     } else if (matchesPattern(key, patterns)) {
       const added = newProperty !== undefined;
       emit(
@@ -303,6 +323,6 @@ export function compareObjects(ctx: Context, o: JsonObject, n: JsonObject, path:
   const oldNames = get(o, 'propertyNames');
   const newNames = get(n, 'propertyNames');
   if (oldNames !== undefined || newNames !== undefined) {
-    ctx.compare(oldNames ?? true, newNames ?? true, `${path} (property names)`);
+    ctx.compare(oldNames ?? true, newNames ?? true, `${path} (property names)`, { kind: 'names' });
   }
 }

@@ -20,10 +20,13 @@ import {
   emit,
   equivalent,
   get,
+  isSchema,
   type Context,
   type SchemaChange,
+  type Step,
 } from './context.ts';
-import { resolve } from './refs.ts';
+import { lookupRef, resolve } from './refs.ts';
+import { childScope } from './scope.ts';
 import {
   compareEnums,
   compareNumbers,
@@ -103,51 +106,126 @@ function identity(value: JsonValue): string {
   return `o${id}`;
 }
 
-const refMemo = new WeakMap<object, boolean>();
+const refsMemo = new WeakMap<object, readonly string[]>();
 
-function containsRef(value: JsonValue): boolean {
+/** Every `$ref` inside `value`; a `$dynamicRef` yields a marker that is never stable. */
+function refsIn(value: JsonValue): readonly string[] {
   if (typeof value !== 'object' || value === null) {
-    return false;
+    return [];
   }
-  const cached = refMemo.get(value);
+  const cached = refsMemo.get(value);
   if (cached !== undefined) {
     return cached;
   }
-  const result = Array.isArray(value)
-    ? value.some(containsRef)
-    : typeof value.$ref === 'string' ||
-      typeof value.$dynamicRef === 'string' ||
-      Object.values(value).some(containsRef);
-  refMemo.set(value, result);
+  const found = new Set<string>();
+  if (!Array.isArray(value)) {
+    if (typeof value.$ref === 'string') {
+      found.add(value.$ref);
+    }
+    if (value.$dynamicRef !== undefined) {
+      found.add('\u0000dynamic');
+    }
+  }
+  for (const item of Object.values(value)) {
+    for (const ref of refsIn(item)) {
+      found.add(ref);
+    }
+  }
+  const result = [...found];
+  refsMemo.set(value, result);
   return result;
 }
 
-function compareNodes(ctx: Context, oldRaw: JsonValue, newRaw: JsonValue, path: string): void {
+/**
+ * True when every reference reachable from `value` resolves to equal
+ * definitions in both schemas, so equal text implies equal meaning.
+ */
+function refsStable(ctx: Context, value: JsonValue): boolean {
+  const pending = [...refsIn(value)];
+  const visited = new Set<string>();
+  for (let ref = pending.pop(); ref !== undefined; ref = pending.pop()) {
+    if (visited.has(ref) || ctx.stableRefs.get(ref) === true) {
+      continue;
+    }
+    visited.add(ref);
+    const before = lookupRef(ctx.oldRoot, ref);
+    const after = lookupRef(ctx.newRoot, ref);
+    if (
+      ctx.stableRefs.get(ref) === false ||
+      !before.ok ||
+      !after.ok ||
+      !jsonEqual(before.value, after.value)
+    ) {
+      ctx.stableRefs.set(ref, false);
+      return false;
+    }
+    pending.push(...refsIn(before.value));
+  }
+  visited.forEach((ref) => ctx.stableRefs.set(ref, true));
+  return true;
+}
+
+const scopeKeys = new WeakMap<readonly JsonValue[], string>();
+
+function scopeKey(scope: readonly JsonValue[]): string {
+  let key = scopeKeys.get(scope);
+  if (key === undefined) {
+    key = scope.map(identity).sort().join(',');
+    scopeKeys.set(scope, key);
+  }
+  return key;
+}
+
+function compareNodes(
+  ctx: Context,
+  oldRaw: JsonValue,
+  newRaw: JsonValue,
+  path: string,
+  step: Step | undefined,
+): void {
+  if (step === undefined) {
+    compareAtLocation(ctx, oldRaw, newRaw, path);
+    return;
+  }
+  const saved = ctx.scope;
+  ctx.scope = childScope(saved, ctx.oldRoot, step);
+  try {
+    compareAtLocation(ctx, oldRaw, newRaw, path);
+  } finally {
+    ctx.scope = saved;
+  }
+}
+
+function compareAtLocation(ctx: Context, oldRaw: JsonValue, newRaw: JsonValue, path: string): void {
   if (ctx.budget.remaining <= 0) {
     ctx.budget.exhausted = true;
     return;
   }
   ctx.budget.remaining -= 1;
 
-  // Coinduction: a pair already being compared further up the stack is assumed
-  // compatible. Both the raw pair and the pair of $ref targets are tracked, so a
-  // recursive definition is unrolled at most once.
-  const rawKey = `${identity(oldRaw)}|${identity(newRaw)}`;
+  // Coinduction: a pair already being compared further up the stack (at the
+  // same kind of location) is assumed compatible. Both the raw pair and the
+  // pair of $ref targets are tracked, so a recursive definition is unrolled at
+  // most once. Keys include the scope because the A1 rule depends on it; there
+  // are finitely many scopes, so recursion still terminates.
+  const scope = scopeKey(ctx.scope);
+  const rawKey = `${identity(oldRaw)}|${identity(newRaw)}|${scope}`;
   if (ctx.stack.has(rawKey)) {
     return;
   }
   const oldResolved = resolve(oldRaw, ctx.oldRoot);
   const newResolved = resolve(newRaw, ctx.newRoot);
   if (!oldResolved.ok || !newResolved.ok) {
-    if (!jsonEqual(oldRaw, newRaw)) {
-      const failure = oldResolved.ok ? newResolved : oldResolved;
-      emit(ctx, 'unknown', 'ref-unresolved', path, 'schema reference changed', {
-        reason: failure.ok ? 'reference could not be followed' : failure.reason,
-      });
+    if (!oldResolved.ok && !newResolved.ok && jsonEqual(oldRaw, newRaw)) {
+      return; // The same unresolvable reference on both sides.
     }
+    const failure = oldResolved.ok ? newResolved : oldResolved;
+    emit(ctx, 'unknown', 'ref-unresolved', path, 'schema reference cannot be compared', {
+      reason: failure.ok ? 'the reference could not be followed' : failure.reason,
+    });
     return;
   }
-  const resolvedKey = `${identity(oldResolved.value)}|${identity(newResolved.value)}`;
+  const resolvedKey = `${identity(oldResolved.value)}|${identity(newResolved.value)}|${scope}`;
   if (ctx.stack.has(resolvedKey)) {
     return;
   }
@@ -161,17 +239,13 @@ function compareNodes(ctx: Context, oldRaw: JsonValue, newRaw: JsonValue, path: 
   }
 }
 
-function isSchema(value: JsonValue): value is JsonObject | boolean {
-  return typeof value === 'boolean' || isJsonObject(value);
-}
-
 function compareResolved(
   ctx: Context,
   oldValue: JsonValue,
   newValue: JsonValue,
   path: string,
 ): void {
-  if (!containsRef(oldValue) && !containsRef(newValue) && jsonEqual(oldValue, newValue)) {
+  if (jsonEqual(oldValue, newValue) && refsStable(ctx, oldValue)) {
     return;
   }
   if (!isSchema(oldValue) || !isSchema(newValue)) {
@@ -332,13 +406,15 @@ export function diffSchemas(
     oldRoot: oldSchema,
     newRoot: newSchema,
     stack: new Set(),
+    stableRefs: new Map(),
     budget: { remaining: maxSteps, exhausted: false },
     out: [],
-    compare: (before, after, path) => {
-      compareNodes(ctx, before, after, path);
+    scope: [oldSchema],
+    compare: (before, after, path, step) => {
+      compareNodes(ctx, before, after, path, step);
     },
   };
-  compareNodes(ctx, oldSchema, newSchema, '$');
+  compareNodes(ctx, oldSchema, newSchema, '$', undefined);
   const seen = new Set<string>();
   const changes: SchemaChange[] = [];
   for (const { effect, ...change } of ctx.out) {

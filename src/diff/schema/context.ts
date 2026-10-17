@@ -36,6 +36,18 @@ export interface Finding extends SchemaChange {
   readonly effect: Effect;
 }
 
+/**
+ * How a recursive comparison moves through the instance: into a member, into
+ * array items, into undeclared members, or into property names. A comparison
+ * without a step stays at the same instance location (an alternative of
+ * `anyOf`, a `$ref` target, ...).
+ */
+export type Step =
+  | { readonly kind: 'property'; readonly key: string }
+  | { readonly kind: 'items'; readonly index: number | undefined }
+  | { readonly kind: 'additional' }
+  | { readonly kind: 'names' };
+
 /** Mutable state of one {@link diffSchemas} run. */
 export interface Context {
   /** Direction under analysis. */
@@ -48,10 +60,21 @@ export interface Context {
   readonly stack: Set<string>;
   /** Remaining comparison steps. */
   readonly budget: { remaining: number; exhausted: boolean };
+  /** Memo: does this reference point at the same definition, transitively, in both schemas? */
+  readonly stableRefs: Map<string, boolean>;
   /** Findings collected so far; swapped out by {@link scratch}. */
   out: Finding[];
-  /** Compares two subschemas found at `path`; the recursive entry point. */
-  readonly compare: (oldSchema: JsonValue, newSchema: JsonValue, path: string) => void;
+  /**
+   * Old subschemas that apply at the current instance location (before
+   * expanding combinators). Used to decide whether a property that the new
+   * schema adds is one that clients may already send.
+   */
+  scope: readonly JsonValue[];
+  /**
+   * Compares two subschemas; the recursive entry point. `step` says how the
+   * instance location changes; omit it for alternatives of the same location.
+   */
+  readonly compare: (oldSchema: JsonValue, newSchema: JsonValue, path: string, step?: Step) => void;
 }
 
 /** Optional parts of a finding. */
@@ -132,17 +155,37 @@ export function scratch(ctx: Context, fn: () => void): Finding[] {
 }
 
 /** True when the two schemas accept exactly the same values (annotations may differ). */
-export function equivalent(ctx: Context, a: JsonValue, b: JsonValue, path: string): boolean {
+export function equivalent(
+  ctx: Context,
+  a: JsonValue,
+  b: JsonValue,
+  path: string,
+  step?: Step,
+): boolean {
   return scratch(ctx, () => {
-    ctx.compare(a, b, path);
+    ctx.compare(a, b, path, step);
   }).every((finding) => finding.effect === 'annotation');
 }
 
 /** True when replacing `a` by `b` is non-breaking in the context's direction. */
-export function compatible(ctx: Context, a: JsonValue, b: JsonValue, path: string): boolean {
+export function compatible(
+  ctx: Context,
+  a: JsonValue,
+  b: JsonValue,
+  path: string,
+  step?: Step,
+): boolean {
   return scratch(ctx, () => {
-    ctx.compare(a, b, path);
+    ctx.compare(a, b, path, step);
   }).every((finding) => finding.severity === 'non-breaking');
+}
+
+/** True for the two shapes a JSON Schema can take: an object or a boolean. */
+export function isSchema(value: JsonValue): value is JsonObject | boolean {
+  return (
+    typeof value === 'boolean' ||
+    (typeof value === 'object' && value !== null && !Array.isArray(value))
+  );
 }
 
 /** Own-property lookup that never reads from the prototype chain. */

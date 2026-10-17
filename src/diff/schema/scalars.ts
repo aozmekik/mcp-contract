@@ -105,24 +105,43 @@ export function compareTypes(ctx: Context, o: JsonObject, n: JsonObject, path: s
   // restriction (or its removal); only report what it does not cover.
   if (removed.length > 0 && newValues === undefined) {
     const unconstrained = declaredTypes(o) === undefined && oldValues === undefined;
+    const types = describeTypes(removed, newTypes);
     const what = unconstrained
       ? `type restricted to ${[...newTypes].join(', ')}`
-      : `no longer accepts ${describeTypes(removed, newTypes)}`;
+      : ctx.direction === 'input'
+        ? `no longer accepts ${types}`
+        : `can no longer be ${types}`;
     emit(ctx, 'narrow', 'type-narrowed', path, what, { before, after });
   }
   if (added.length > 0 && oldValues === undefined) {
     const unconstrained = declaredTypes(n) === undefined && newValues === undefined;
+    const types = describeTypes(added, oldTypes);
     const what = unconstrained
       ? 'type restriction removed'
-      : `now also accepts ${describeTypes(added, oldTypes)}`;
+      : ctx.direction === 'input'
+        ? `now also accepts ${types}`
+        : `may now also be ${types}`;
     emit(ctx, 'widen', 'type-widened', path, what, { before, after });
   }
 }
 
+/**
+ * The enum/const values an instance can actually take: values whose JSON type
+ * is excluded by `type` can never validate, so they are dropped.
+ */
+function effectiveValues(schema: JsonObject): JsonValue[] | undefined {
+  const values = enumValues(schema);
+  const declared = declaredTypes(schema);
+  if (values === undefined || declared === undefined) {
+    return values;
+  }
+  return values.filter((value) => coversType(declared, valueType(value)));
+}
+
 /** Compares `enum`/`const` value sets. */
 export function compareEnums(ctx: Context, o: JsonObject, n: JsonObject, path: string): void {
-  const oldValues = enumValues(o);
-  const newValues = enumValues(n);
+  const oldValues = effectiveValues(o);
+  const newValues = effectiveValues(n);
   if (oldValues === undefined && newValues === undefined) {
     return;
   }

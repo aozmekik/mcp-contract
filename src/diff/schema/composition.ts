@@ -53,11 +53,20 @@ function describeBranch(branch: JsonValue): string {
       ? `const ${formatValue(first)}`
       : `enum ${formatValues(values)}`;
   }
-  const types = declaredTypes(branch);
-  if (types !== undefined && types.size > 0) {
-    return [...types].join('|');
+  const properties = get(branch, 'properties');
+  if (isJsonObject(properties)) {
+    // e.g. `object {kind: "url", url}` for a discriminated-union variant.
+    const names = Object.keys(properties);
+    const shown = names.slice(0, 3).map((name) => {
+      const property = properties[name];
+      const constant = isJsonObject(property) ? enumValues(property) : undefined;
+      const [only] = constant ?? [];
+      return constant?.length === 1 && only !== undefined ? `${name}: ${formatValue(only)}` : name;
+    });
+    return `object {${shown.join(', ')}${names.length > 3 ? ', ...' : ''}}`;
   }
-  return isJsonObject(branch.properties) ? 'object' : 'schema';
+  const types = declaredTypes(branch);
+  return types !== undefined && types.size > 0 ? [...types].join('|') : 'schema';
 }
 
 function describeBranches(branches: readonly JsonValue[]): string {
@@ -146,8 +155,12 @@ function compareUnion(
   afterBranches: readonly JsonValue[],
   path: string,
 ): void {
-  const before = beforeBranches.flatMap(expandTypeUnion);
-  const after = afterBranches.flatMap(expandTypeUnion);
+  // Splitting `type: [a, b]` into alternatives is exact for anyOf. For oneOf it
+  // is not (integer and number overlap), so oneOf alternatives are kept whole.
+  const expand = (branches: readonly JsonValue[]): JsonValue[] =>
+    keyword === 'anyOf' ? branches.flatMap(expandTypeUnion) : [...branches];
+  const before = expand(beforeBranches);
+  const after = expand(afterBranches);
   const { pairs, oldRest, newRest } = matchEquivalent(ctx, before, after, path);
   for (const [left, right] of pairs) {
     ctx.compare(left, right, path); // surfaces annotation-only differences
@@ -335,8 +348,13 @@ export function compareUnionKeyword(
     return;
   }
   const branches = before ?? after;
-  if (branches === undefined || branches.some((branch) => equivalent(ctx, true, branch, path))) {
-    return; // Absent on both sides, or one alternative accepts everything.
+  if (branches === undefined) {
+    return;
+  }
+  // An anyOf with an alternative that accepts everything constrains nothing.
+  // The same is not true of oneOf: `oneOf: [{}, X]` means "not X".
+  if (keyword === 'anyOf' && branches.some((branch) => equivalent(ctx, true, branch, path))) {
+    return;
   }
   if (before === undefined) {
     emit(

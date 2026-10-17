@@ -91,10 +91,13 @@ function compareInfo(
   const old = field(before, key);
   const current = field(after, key);
   if (!same(old, current)) {
-    const label = location === undefined ? key : `${location}.${key}`;
     const scalar = (value: JsonValue | undefined): JsonValue | undefined =>
       typeof value === 'object' && value !== null ? undefined : value;
-    push(scope, 'non-breaking', code, `${label} ${changeVerb(old, current)}`, {
+    // Short values such as versions or names are worth showing inline; prose is not.
+    const short = (value: JsonValue | undefined): value is string =>
+      typeof value === 'string' && value.length <= 40 && !value.includes('\n');
+    const values = short(old) && short(current) ? ` from ${old} to ${current}` : '';
+    push(scope, 'non-breaking', code, `${key} ${changeVerb(old, current)}${values}`, {
       location,
       before: scalar(old),
       after: scalar(current),
