@@ -1,0 +1,203 @@
+/**
+ * Shared state and helpers for the schema comparison modules.
+ *
+ * The recursive entry point is reached through `ctx.compare`, so the keyword
+ * modules (scalars, structures, composition) depend only on this file and
+ * never on each other or on the dispatcher.
+ */
+import { jsonEqual, type JsonObject, type JsonValue } from '../../core/json.ts';
+import type { ChangeCode, SchemaDirection, Severity } from '../model.ts';
+
+/** A classified difference inside one schema. */
+export interface SchemaChange {
+  /** Impact on clients for the analysed direction. */
+  readonly severity: Severity;
+  /** Stable identifier of the rule that fired. */
+  readonly code: ChangeCode;
+  /** Instance path, e.g. `$.filters[*].tag`; `$` is the schema root. */
+  readonly path: string;
+  /** Human explanation. */
+  readonly message: string;
+  /** Previous value of the changed keyword, when meaningful. */
+  readonly before?: JsonValue;
+  /** New value of the changed keyword, when meaningful. */
+  readonly after?: JsonValue;
+}
+
+/**
+ * What a change does to the set of accepted instances, independent of
+ * direction. `annotation` changes never affect validation.
+ */
+export type Effect = 'widen' | 'narrow' | 'incompatible' | 'unknown' | 'annotation';
+
+/** A change plus the effect it was derived from. */
+export interface Finding extends SchemaChange {
+  /** Direction-independent effect. */
+  readonly effect: Effect;
+}
+
+/** Mutable state of one {@link diffSchemas} run. */
+export interface Context {
+  /** Direction under analysis. */
+  readonly direction: SchemaDirection;
+  /** Root of the old schema, for `$ref` resolution. */
+  readonly oldRoot: JsonValue;
+  /** Root of the new schema, for `$ref` resolution. */
+  readonly newRoot: JsonValue;
+  /** Pairs currently being compared (coinductive cycle detection). */
+  readonly stack: Set<string>;
+  /** Remaining comparison steps. */
+  readonly budget: { remaining: number; exhausted: boolean };
+  /** Findings collected so far; swapped out by {@link scratch}. */
+  out: Finding[];
+  /** Compares two subschemas found at `path`; the recursive entry point. */
+  readonly compare: (oldSchema: JsonValue, newSchema: JsonValue, path: string) => void;
+}
+
+/** Optional parts of a finding. */
+export interface EmitDetails {
+  /** Previous value. */
+  readonly before?: JsonValue | undefined;
+  /** New value. */
+  readonly after?: JsonValue | undefined;
+  /** Replaces the generic consequence sentence. */
+  readonly reason?: string;
+  /** Overrides the severity derived from the effect and direction. */
+  readonly severity?: Severity;
+}
+
+function severityOf(effect: Effect, direction: SchemaDirection): Severity {
+  switch (effect) {
+    case 'annotation':
+      return 'non-breaking';
+    case 'unknown':
+      return 'unknown';
+    case 'incompatible':
+      return 'breaking';
+    case 'widen':
+      return direction === 'input' ? 'non-breaking' : 'breaking';
+    case 'narrow':
+      return direction === 'input' ? 'breaking' : 'non-breaking';
+  }
+}
+
+function consequence(direction: SchemaDirection, severity: Severity): string {
+  if (direction === 'input') {
+    return severity === 'breaking'
+      ? 'arguments that were valid before can now be rejected'
+      : 'arguments that were valid before are still accepted';
+  }
+  return severity === 'breaking'
+    ? 'results can now contain values that clients written against the old schema do not expect'
+    : 'results stay within what clients already handle';
+}
+
+/** Records a finding; the severity follows from the effect and the direction unless overridden. */
+export function emit(
+  ctx: Context,
+  effect: Effect,
+  code: ChangeCode,
+  path: string,
+  what: string,
+  details: EmitDetails = {},
+): void {
+  const severity = details.severity ?? severityOf(effect, ctx.direction);
+  let message = what;
+  if (details.reason !== undefined) {
+    message = `${what}; ${details.reason}`;
+  } else if (effect !== 'annotation' && effect !== 'unknown') {
+    message = `${what}; ${consequence(ctx.direction, severity)}`;
+  }
+  ctx.out.push({
+    severity,
+    code,
+    path,
+    message,
+    effect,
+    ...(details.before === undefined ? {} : { before: details.before }),
+    ...(details.after === undefined ? {} : { after: details.after }),
+  });
+}
+
+/** Runs `fn` with a private findings buffer and returns what it found. */
+export function scratch(ctx: Context, fn: () => void): Finding[] {
+  const saved = ctx.out;
+  ctx.out = [];
+  try {
+    fn();
+    return ctx.out;
+  } finally {
+    ctx.out = saved;
+  }
+}
+
+/** True when the two schemas accept exactly the same values (annotations may differ). */
+export function equivalent(ctx: Context, a: JsonValue, b: JsonValue, path: string): boolean {
+  return scratch(ctx, () => {
+    ctx.compare(a, b, path);
+  }).every((finding) => finding.effect === 'annotation');
+}
+
+/** True when replacing `a` by `b` is non-breaking in the context's direction. */
+export function compatible(ctx: Context, a: JsonValue, b: JsonValue, path: string): boolean {
+  return scratch(ctx, () => {
+    ctx.compare(a, b, path);
+  }).every((finding) => finding.severity === 'non-breaking');
+}
+
+/** Own-property lookup that never reads from the prototype chain. */
+export function get(schema: JsonObject, key: string): JsonValue | undefined {
+  return Object.hasOwn(schema, key) ? schema[key] : undefined;
+}
+
+/** Equality for values that may be absent. */
+export function sameOptional(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return jsonEqual(a, b);
+}
+
+/** Returns `value` when it is a finite number. */
+export function finite(value: JsonValue | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Short JSON rendering for messages. */
+export function formatValue(value: JsonValue): string {
+  const text = JSON.stringify(value);
+  return text.length > 60 ? `${text.slice(0, 57)}...` : text;
+}
+
+/** Renders at most five values for messages. */
+export function formatValues(values: readonly JsonValue[]): string {
+  const shown = values.slice(0, 5).map(formatValue).join(', ');
+  return values.length > 5 ? `${shown} and ${values.length - 5} more` : shown;
+}
+
+/** English plural for counts in messages. */
+export function plural(count: number, word: string): string {
+  return count === 1 ? word : `${word}s`;
+}
+
+/** Appends an object member to an instance path. */
+export function propertyPath(path: string, key: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+    ? `${path}.${key}`
+    : `${path}[${JSON.stringify(key)}]`;
+}
+
+/** Describes a keyword change as added, removed or changed. */
+export function describeChange(
+  keyword: string,
+  before: JsonValue | undefined,
+  after: JsonValue | undefined,
+): string {
+  if (before === undefined) {
+    return `${keyword} added`;
+  }
+  if (after === undefined) {
+    return `${keyword} removed`;
+  }
+  return `${keyword} changed`;
+}
