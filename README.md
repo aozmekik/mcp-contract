@@ -57,7 +57,8 @@ npx mcp-contract --help
 
 Installing from Git builds the package locally through its `prepare` script (TypeScript and
 tsup are fetched as development dependencies for that step). The build tooling expects Node
-22.18 or newer.
+22.18 or newer. TypeScript users also need `@types/node`: the MCP SDK's declarations, and
+mcp-contract's `AsyncDisposable` connections, refer to Node's global types.
 
 ## Quick start
 
