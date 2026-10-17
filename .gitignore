@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test and coverage output
+coverage/
+.vitest/
+*.lcov
+
+# Package tarballs
+*.tgz
+
+# Caches
+.eslintcache
+.prettiercache
+.cache/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Snapshots written by ad-hoc local runs (examples commit their own explicitly)
+/mcp-contract.snapshot.json

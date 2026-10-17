@@ -1,0 +1,6 @@
+dist/
+coverage/
+node_modules/
+package-lock.json
+# Snapshots are written by mcp-contract itself in a canonical layout.
+*.snapshot.json
