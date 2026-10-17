@@ -111,6 +111,9 @@ export function describeTarget(target: ServerTarget): string {
     case 'stdio':
       return `stdio: ${[target.command, ...(target.args ?? [])].map(quoteWord).join(' ')}`;
     case 'http': {
+      if (!URL.canParse(String(target.url))) {
+        return 'http: (invalid URL)';
+      }
       const url = new URL(target.url);
       return `http: ${url.origin}${url.pathname}`;
     }
@@ -214,17 +217,33 @@ export async function connectServer(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new UsageError(`Timeout must be a positive number of milliseconds, got ${timeoutMs}`);
   }
-  const description = describeTarget(target);
+  const { signal } = options;
+  if (signal?.aborted === true) {
+    throw new ServerError(
+      `Could not connect to ${describeTarget(target)}: aborted before starting`,
+      {
+        cause: signal.reason,
+      },
+    );
+  }
   const { transport, stderrTail } = prepareTransport(target);
+  const description = describeTarget(target);
   const client = new Client(
     { name: 'mcp-contract', version: VERSION },
     { versionNegotiation: { mode: negotiationMode(options.protocol) } },
   );
 
+  // The SDK does not watch the signal while it probes a stdio server on a
+  // sibling process, but closing the transport aborts that probe and reaps the
+  // sibling. Closing on abort therefore stops every phase of the connect.
+  const onAbort = (): void => {
+    transport.close().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
   try {
     await client.connect(transport, {
       timeout: timeoutMs,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(signal === undefined ? {} : { signal }),
     });
   } catch (error) {
     await closeQuietly(client, transport);
@@ -232,6 +251,8 @@ export async function connectServer(
       cause: error,
       serverStderr: stderrTail(),
     });
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
 
   const era = client.getProtocolEra();
