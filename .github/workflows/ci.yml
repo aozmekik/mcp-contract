@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install (also builds, via the prepare script)
+        run: npm ci
+      - name: Check formatting
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test with coverage
+        run: npm run coverage
+      - name: Build
+        run: npm run build
+      - name: Run the examples with the built CLI
+        run: npm run examples
+
+  action:
+    name: Composite action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install the example servers' dependencies
+        run: npm ci
+      - name: v1 matches its committed snapshot
+        uses: ./
+        with:
+          stdio: node examples/notes-server/v1.ts
+          snapshot: examples/notes-server/v1.snapshot.json
+      - name: v1 passes its scenarios
+        uses: ./
+        with:
+          command: test
+          scenarios: examples/notes-server/scenarios.yaml
+      - name: v2 is reported as breaking (expected to fail)
+        id: breaking
+        continue-on-error: true
+        uses: ./
+        with:
+          stdio: node examples/notes-server/v2.ts
+          snapshot: examples/notes-server/v1.snapshot.json
+      - name: Assert that the v2 check failed
+        if: steps.breaking.outcome != 'failure'
+        run: |
+          echo "::error::the check against v2 should have failed"
+          exit 1

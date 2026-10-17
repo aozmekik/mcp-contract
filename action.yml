@@ -1,0 +1,99 @@
+name: mcp-contract
+description: Contract-test a Model Context Protocol server in CI (not published on the GitHub Marketplace).
+author: Ahmed Semih Özmekik
+
+inputs:
+  command:
+    description: 'What to run: check (default), test, snapshot or diff.'
+    required: false
+    default: check
+  stdio:
+    description: Command line that starts the server over stdio, e.g. "node dist/server.js".
+    required: false
+    default: ''
+  url:
+    description: Streamable HTTP endpoint of an already running server.
+    required: false
+    default: ''
+  headers:
+    description: HTTP headers for url, one name=value per line.
+    required: false
+    default: ''
+  snapshot:
+    description: Committed baseline (check), output file (snapshot) or new snapshot (diff).
+    required: false
+    default: mcp-contract.snapshot.json
+  baseline:
+    description: Old snapshot for diff.
+    required: false
+    default: ''
+  scenarios:
+    description: Scenario file for test.
+    required: false
+    default: ''
+  fail-on:
+    description: 'Which changes fail check and diff: breaking, unknown (default) or any.'
+    required: false
+    default: unknown
+  protocol:
+    description: 'Protocol negotiation: auto (default), legacy, or a revision such as 2026-07-28.'
+    required: false
+    default: auto
+  working-directory:
+    description: Directory to run in; relative paths in other inputs are resolved against it.
+    required: false
+    default: .
+  node-version:
+    description: Node.js version to set up. Set to an empty string to use the runner's Node.
+    required: false
+    default: '24'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      if: inputs.node-version != ''
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Build mcp-contract
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --no-audit --no-fund --loglevel=error
+
+    - name: Run mcp-contract
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        MCP_CONTRACT_CLI: ${{ github.action_path }}/dist/cli.js
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_STDIO: ${{ inputs.stdio }}
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_HEADERS: ${{ inputs.headers }}
+        INPUT_SNAPSHOT: ${{ inputs.snapshot }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_SCENARIOS: ${{ inputs.scenarios }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_PROTOCOL: ${{ inputs.protocol }}
+      run: |
+        # Inputs arrive through the environment, never through ${{ }} in the
+        # script body, so they cannot inject shell code.
+        set -euo pipefail
+        args=("$INPUT_COMMAND")
+        case "$INPUT_COMMAND" in
+          check) args+=(--snapshot "$INPUT_SNAPSHOT" --fail-on "$INPUT_FAIL_ON" --format github) ;;
+          test) args+=("$INPUT_SCENARIOS" --format github) ;;
+          snapshot) args+=(-o "$INPUT_SNAPSHOT") ;;
+          diff) args+=("$INPUT_BASELINE" "$INPUT_SNAPSHOT" --fail-on "$INPUT_FAIL_ON" --format github) ;;
+          *) echo "::error title=mcp-contract::unknown command '$INPUT_COMMAND'"; exit 2 ;;
+        esac
+        if [[ "$INPUT_COMMAND" != diff ]]; then
+          if [[ -n "$INPUT_STDIO" ]]; then args+=(--stdio "$INPUT_STDIO"); fi
+          if [[ -n "$INPUT_URL" ]]; then args+=(--url "$INPUT_URL"); fi
+          while IFS= read -r header; do
+            if [[ -n "$header" ]]; then args+=(--header "$header"); fi
+          done <<< "$INPUT_HEADERS"
+          args+=(--protocol "$INPUT_PROTOCOL")
+        fi
+        node "$MCP_CONTRACT_CLI" "${args[@]}"

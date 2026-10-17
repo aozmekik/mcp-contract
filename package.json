@@ -1,7 +1,6 @@
 {
   "name": "mcp-contract",
   "version": "0.1.0",
-  "private": false,
   "description": "Contract testing for Model Context Protocol servers: snapshot tools, resources and prompts, and classify schema changes as breaking or not.",
   "keywords": [
     "mcp",
@@ -27,13 +26,14 @@
     },
     "./package.json": "./package.json"
   },
+  "types": "./dist/index.d.ts",
   "bin": {
     "mcp-contract": "./dist/cli.js"
   },
   "files": [
-    "dist",
-    "action.yml"
+    "dist"
   ],
+  "sideEffects": false,
   "engines": {
     "node": ">=22"
   },
@@ -48,7 +48,8 @@
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "examples": "node scripts/run-examples.ts",
-    "ci": "npm run format:check && npm run lint && npm run typecheck && npm run coverage && npm run build && npm run examples"
+    "ci": "npm run format:check && npm run lint && npm run typecheck && npm run coverage && npm run build && npm run examples",
+    "bench": "node scripts/bench.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.3.1",
