@@ -53,7 +53,9 @@ what it promises:
 - pagination is walked explicitly (`client.request({ method, params: { cursor } })`)
   so that a repeated cursor and a page cap are reported as server errors with
   a clear message;
-- the negotiated era and revision are recorded in every snapshot.
+- the negotiated era and revision are recorded in every snapshot, together
+  with the negotiation mode and, for modern servers, the revisions
+  `server/discover` lists.
 
 ## Consequences
 
@@ -68,13 +70,21 @@ what it promises:
 - On stdio, a probe that times out is taken as a legacy server. A slow-starting
   modern server is therefore not misclassified only if the timeout is long
   enough; the probe uses the same timeout as every request (30 s by default)
-  rather than a short one for that reason.
+  rather than a short one for that reason. The cost falls on 2025-era servers
+  that ignore requests sent before `initialize`: they add the whole probe
+  timeout to every run. mcp-contract prints a hint when a probe used up its
+  timeout, and `--probe-timeout` (or `--protocol legacy`) avoids the wait.
 - The SDK does not watch the abort signal during the stdio probe; closing the
   transport does abort it. `connectServer` closes the transport when the
   signal fires, so Ctrl-C works in every phase (covered by a test).
-- The negotiated revision is part of the snapshot, so moving a server from the
-  2025 SDK to the v2 SDK shows up as an `unknown` `protocol-changed` change
-  that has to be acknowledged by re-taking the baseline.
+- The negotiated revision depends on the client's mode as well as on the
+  server. Revisions are therefore compared through the server's supported
+  list when both snapshots have one (a lost revision is breaking), not at all
+  when the snapshots were negotiated with different modes, and `check`
+  negotiates the way its baseline was negotiated. Moving a server from the
+  2025 SDK to the v2 SDK still shows up as an `unknown` `protocol-changed`
+  change, because whether 2025-era clients can still connect is not checked
+  under `auto`.
 - We depend on a young major version. The SDK's typings and behaviour are
   isolated in `src/connect/` and `src/snapshot/capture.ts`, so an API change is
   contained there.

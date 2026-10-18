@@ -6,7 +6,8 @@ larger than a fix, please open an issue first so we can agree on the approach.
 ## Requirements
 
 - Node.js 22.18 or newer (the example servers, test fixtures and scripts run as
-  TypeScript through Node's built-in type stripping). CI runs Node 22 and 24.
+  TypeScript through Node's built-in type stripping, and tsup 9 needs it). CI
+  runs Node 22.18.0, the latest 22 and the latest 24.
 - npm 10 or newer.
 
 ## Setup
@@ -65,4 +66,7 @@ docs/adr/        design decisions
 ## Commits
 
 Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`, `ci:`, `chore:`), one
-logical change per commit. Keep the tree passing `npm run ci` at every commit.
+logical change per commit, with the tests for a change in the same commit.
+Every pull request must pass `npm run ci`, and each commit should pass it on
+its own. (The first commits of this repository predate that rule: some of
+them do not build on their own, and their tests arrived in later commits.)

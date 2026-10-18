@@ -47,9 +47,12 @@ keywords, so narrowing one keyword narrows the schema), with interacting
 keywords analysed together (`properties`/`required`/`additionalProperties`,
 `items`/`prefixItems`, bounds with their exclusive forms). Everything that
 cannot be decided is `unknown`: pattern and format changes, `not`,
-`if`/`then`/`else`, unknown keywords, non-local or broken `$ref`s, and any
-`oneOf` change that would otherwise be judged compatible (exclusivity can flip
-in either direction).
+`if`/`then`/`else`, unknown keywords, `$dynamicRef` and references that
+cannot be followed unless they provably mean the same on both sides,
+structural changes next to an `unevaluated*` keyword whose effect is not
+modelled (both in ADR 0004),
+and any `oneOf` change that would otherwise be judged compatible (exclusivity
+can flip in either direction).
 
 Two assumptions, stated in the code and here, keep the verdicts useful:
 
@@ -58,10 +61,12 @@ Two assumptions, stated in the code and here, keep the verdicts useful:
   non-breaking. "Declares" is judged against every old subschema that applies
   at the location, not just the node being compared: if a sibling `anyOf`
   alternative or `allOf` member declares the property, or a map-like
-  `additionalProperties` schema accepts arbitrary keys, the change is `unknown`.
+  `additionalProperties` (or `unevaluatedProperties`) schema accepts arbitrary
+  keys, the change is `unknown`.
 - **A2 (outputs):** clients ignore result fields they do not know. Adding an
   optional output field is non-breaking even under `additionalProperties:
-false`.
+false`. A field that a schema-valued `unevaluatedProperties` used to type is
+  not unknown to clients, so A2 does not apply to it.
 
 Where the pragmatic view is stricter than set inclusion, the stricter view
 wins: removing a declared output field is always breaking (clients may read
@@ -75,11 +80,22 @@ policies; MIME type changes on resources are breaking; capability removals are
 breaking.
 
 Recursive schemas are handled coinductively: a pair of subschemas already
-being compared further up the stack is assumed compatible, the standard
-greatest-fixed-point treatment of recursive types. A step budget bounds
-pathological schemas, as the MCP specification asks implementations to do;
-exceeding it adds an `unknown` "schema too complex" change rather than an
-incomplete pass.
+being compared further up the stack is assumed to contribute no further
+change, the standard greatest-fixed-point treatment of recursive types. The
+engine asks three kinds of question: it reports changes, and, to pair union
+alternatives and check coverage, it asks whether two subschemas are
+equivalent or compatible. A hypothesis made while answering one kind of
+question is never used for another: "this pair is being reported" says
+nothing about whether it is equivalent. One case needs more: when a `oneOf`
+alternative is known not to be equivalent but its comparison finds nothing,
+because the difference is reported where the recursion was first entered, the
+alternative is still `unknown` (exclusivity can flip). A step budget and a
+nesting limit bound pathological schemas, as the MCP specification asks
+implementations to do; exceeding either adds a `schema-too-complex` change,
+which fails the check at every `--fail-on` level because the part that was not
+analysed may hide breaking changes. Identical union alternatives are paired
+through a hash map before any pairwise comparison, so reordering a large union
+does not spend the budget.
 
 The CLI and the test assertion fail on `breaking` and `unknown` by default
 (`--fail-on unknown`): a change that cannot be proven safe should be looked
@@ -103,17 +119,32 @@ against the compared node only instead of the whole instance location, an
 treated as unchanged, and a property whose "schema" is not a schema accepted
 silently. Reviewing the engine while writing the test exposed two more:
 splitting `type` arrays into alternatives is not exact under `oneOf`, and
-`enum` values excluded by `type` were still counted. All are fixed and have
-unit tests.
+`enum` values excluded by `type` were still counted.
+
+An external review of that version then found defects in constructs the
+generators did not produce: a stack overflow on recursive `$ref`s with
+constraint siblings, `unevaluatedProperties`/`unevaluatedItems` ignored when
+the keywords around them changed, unresolvable anchors and embedded `$id`s
+treated as unchanged, and cycle hypotheses leaking into equivalence checks
+(through a recursive `oneOf` alternative). The generators now produce `$ref`
+with siblings, recursion through `oneOf`, objects closed by
+`unevaluatedProperties` (also through `allOf`) and tuples with
+`unevaluatedItems`; run against the old engine they hit the stack overflow
+within a few hundred cases. A long search with them found one more defect in
+the new rules (A2 applied to fields a schema-valued `unevaluatedProperties`
+had typed). All are fixed and have unit tests.
 
 ## Consequences
 
 - Verdicts are explainable: each change names the rule (`code`), the location
   (`inputSchema $.filters[*].tag`) and the consequence.
-- The `non-breaking` verdict is sound under A1 and A2 for the keywords the
-  property test generates (types, bounds, enums, objects, arrays, unions,
-  `allOf`, local references); keywords outside that set are compared opaquely
-  and changes to them are `unknown`.
+- The `non-breaking` verdict is checked against Ajv under A1 and A2 for the
+  keywords the property test generates (types, bounds, enums, objects,
+  arrays and tuples, unions, `allOf`, `unevaluated*`, local references with
+  and without siblings); keywords outside that set are compared opaquely and
+  changes to them are `unknown`. This is evidence, not a proof: the first
+  version passed the same kind of test while defects remained in constructs
+  its generators did not produce.
 - `breaking` can be a false positive: for example narrowing one `anyOf`
   alternative is reported as breaking even if another alternative still covers
   the removed values. This is the conservative direction.

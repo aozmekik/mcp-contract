@@ -43,8 +43,12 @@ Option 3:
 - a top-level `formatVersion` (currently 1), checked on read;
 - atomic writes (temporary file, then rename).
 
-The negotiated protocol revision and the server's self-reported name and
-version are part of the snapshot: they are part of what clients observe.
+The negotiated protocol revision (with the negotiation mode and, for modern
+servers, the revisions `server/discover` lists) and the server's
+self-reported name and version are part of the snapshot: they are part of
+what clients observe. The supported revisions are a set, so they are sorted.
+Fields added later are optional, so older snapshots keep parsing without a
+`formatVersion` change.
 
 ## Consequences
 
