@@ -105,3 +105,21 @@ describe('jsonTypeOf', () => {
     ]);
   });
 });
+
+describe('members named like Object.prototype properties', () => {
+  it('keeps __proto__ and constructor as ordinary members', () => {
+    const parsed = JSON.parse('{"__proto__":{"type":"string"},"constructor":1,"a":2}') as unknown;
+    const canonical = canonicalize(parsed);
+    expect(Object.getPrototypeOf(canonical)).toBe(Object.prototype);
+    expect(Object.keys(canonical as object)).toEqual(['__proto__', 'a', 'constructor']);
+    expect(canonicalJson(parsed)).toBe('{"__proto__":{"type":"string"},"a":2,"constructor":1}');
+    expect(canonicalize(canonical)).toEqual(canonical);
+  });
+
+  it('compares own members only', () => {
+    const withProto = JSON.parse('{"__proto__":1}') as JsonValue;
+    expect(jsonEqual(withProto, JSON.parse('{"__proto__":1}') as JsonValue)).toBe(true);
+    expect(jsonEqual(withProto, { a: 1 })).toBe(false);
+    expect(jsonEqual({ toString: 1 }, { valueOf: 1 })).toBe(false);
+  });
+});

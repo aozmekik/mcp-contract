@@ -1,4 +1,10 @@
-import { compareCodeUnits, isJsonObject, type JsonObject, type JsonValue } from '../core/json.ts';
+import {
+  compareCodeUnits,
+  defineMember,
+  isJsonObject,
+  type JsonObject,
+  type JsonValue,
+} from '../core/json.ts';
 
 /**
  * Keyword tables for JSON Schema 2020-12 (the MCP default dialect) plus the
@@ -50,7 +56,11 @@ export const ANNOTATION_KEYWORDS: ReadonlySet<string> = new Set([
   'writeOnly',
 ]);
 
-/** Applies `fn` to every direct subschema of `schema` and returns the rebuilt schema. */
+/**
+ * Applies `fn` to every direct subschema of `schema` and returns the rebuilt
+ * schema. Members are defined, never assigned, so a property named
+ * `__proto__` stays an ordinary member.
+ */
 export function mapSubschemas(
   schema: JsonValue,
   fn: (subschema: JsonValue) => JsonValue,
@@ -60,31 +70,46 @@ export function mapSubschemas(
   }
   const result: JsonObject = {};
   for (const [keyword, value] of Object.entries(schema)) {
-    if (SINGLE_SUBSCHEMA_KEYWORDS.has(keyword)) {
-      result[keyword] = fn(value);
-    } else if (keyword === 'items') {
-      // `items` is a schema in 2020-12 and may be an array of schemas in older drafts.
-      result[keyword] = Array.isArray(value) ? value.map(fn) : fn(value);
-    } else if (ARRAY_SUBSCHEMA_KEYWORDS.has(keyword) && Array.isArray(value)) {
-      result[keyword] = value.map(fn);
-    } else if (MAP_SUBSCHEMA_KEYWORDS.has(keyword) && isJsonObject(value)) {
-      const mapped: JsonObject = {};
-      for (const [name, subschema] of Object.entries(value)) {
-        mapped[name] = fn(subschema);
-      }
-      result[keyword] = mapped;
-    } else if (keyword === 'dependencies' && isJsonObject(value)) {
-      // draft-07: values are either schemas or arrays of property names.
-      const mapped: JsonObject = {};
-      for (const [name, dependency] of Object.entries(value)) {
-        mapped[name] = Array.isArray(dependency) ? dependency : fn(dependency);
-      }
-      result[keyword] = mapped;
-    } else {
-      result[keyword] = value;
-    }
+    defineMember(result, keyword, mapKeyword(keyword, value, fn));
   }
   return result;
+}
+
+function mapKeyword(
+  keyword: string,
+  value: JsonValue,
+  fn: (subschema: JsonValue) => JsonValue,
+): JsonValue {
+  if (SINGLE_SUBSCHEMA_KEYWORDS.has(keyword)) {
+    return fn(value);
+  }
+  if (keyword === 'items') {
+    // `items` is a schema in 2020-12 and may be an array of schemas in older drafts.
+    return Array.isArray(value) ? value.map(fn) : fn(value);
+  }
+  if (ARRAY_SUBSCHEMA_KEYWORDS.has(keyword) && Array.isArray(value)) {
+    return value.map(fn);
+  }
+  if ((MAP_SUBSCHEMA_KEYWORDS.has(keyword) || keyword === 'dependencies') && isJsonObject(value)) {
+    const mapped: JsonObject = {};
+    for (const [name, member] of Object.entries(value)) {
+      // draft-07 `dependencies` values are either schemas or arrays of property names.
+      const keep = keyword === 'dependencies' && Array.isArray(member);
+      defineMember(mapped, name, keep ? member : fn(member));
+    }
+    return mapped;
+  }
+  return value;
+}
+
+/** The direct subschemas of `schema`, in keyword order. */
+export function subschemasOf(schema: JsonValue): JsonValue[] {
+  const found: JsonValue[] = [];
+  mapSubschemas(schema, (subschema) => {
+    found.push(subschema);
+    return subschema;
+  });
+  return found;
 }
 
 function sortedUniqueStrings(values: readonly JsonValue[]): JsonValue[] | undefined {
@@ -105,11 +130,11 @@ export function normalizeSchema(schema: JsonValue): JsonValue {
     return mapped;
   }
   for (const keyword of ['required', 'type'] as const) {
-    const value = mapped[keyword];
+    const value = Object.hasOwn(mapped, keyword) ? mapped[keyword] : undefined;
     if (Array.isArray(value)) {
       const normalized = sortedUniqueStrings(value);
       if (normalized !== undefined) {
-        mapped[keyword] = normalized;
+        defineMember(mapped, keyword, normalized);
       }
     }
   }

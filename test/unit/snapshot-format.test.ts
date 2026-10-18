@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InvalidFileError } from '../../src/core/errors.ts';
+import type { JsonObject } from '../../src/core/json.ts';
+import { diffSnapshots } from '../../src/diff/snapshot-diff.ts';
 import { readSnapshot, writeSnapshot } from '../../src/snapshot/files.ts';
 import {
   createSnapshot,
@@ -111,6 +113,34 @@ describe('serializeSnapshot', () => {
   it('normalizeSnapshot is idempotent', () => {
     const snapshot = snapshotOf({ tools: [tool('b'), tool('a')] });
     expect(normalizeSnapshot(normalizeSnapshot(snapshot))).toEqual(normalizeSnapshot(snapshot));
+  });
+});
+
+describe('members named __proto__', () => {
+  it('survive parsing, normalisation and serialisation', () => {
+    const text = serializeSnapshot(snapshotOf({ tools: [tool('t')] })).replace(
+      '"inputSchema": {\n        "type": "object"\n      }',
+      '"inputSchema": {"type":"object","required":["__proto__"],"properties":{"__proto__":{"type":"string"},"a":{}}}',
+    );
+    expect(text).toContain('__proto__');
+    const snapshot = parseSnapshot(text);
+    const schema = snapshot.tools[0]?.inputSchema;
+    expect(Object.keys((schema?.properties ?? {}) as object)).toEqual(['__proto__', 'a']);
+    expect(serializeSnapshot(snapshot)).toContain('"__proto__": {\n');
+    expect(parseSnapshot(serializeSnapshot(snapshot))).toEqual(snapshot);
+  });
+
+  it('are compared like any other property', () => {
+    const schema = (type: string) =>
+      JSON.parse(`{"type":"object","properties":{"__proto__":{"type":"${type}"}}}`) as JsonObject;
+    const changes = diffSnapshots(
+      snapshotOf({ tools: [tool('t', { inputSchema: schema('string') })] }),
+      snapshotOf({ tools: [tool('t', { inputSchema: schema('integer') })] }),
+    ).changes;
+    expect(changes.map((change) => [change.severity, change.path])).toEqual([
+      ['breaking', '$.__proto__'],
+      ['non-breaking', '$.__proto__'],
+    ]);
   });
 });
 

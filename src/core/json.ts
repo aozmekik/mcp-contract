@@ -18,6 +18,20 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
+/**
+ * Adds an own enumerable member to `object`. Unlike `object[key] = value`, this
+ * also works for a key named `__proto__`, which JSON allows: assignment would
+ * replace the object's prototype instead of creating a member.
+ */
+export function defineMember(object: JsonObject, key: string, value: JsonValue): void {
+  Object.defineProperty(object, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 /** Returns true when `value` is a plain JSON object (not an array, not null). */
 export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -76,7 +90,7 @@ function canonicalizeAt(value: unknown, path: string, ancestors: Set<object>): J
       const item = record[key];
       // `undefined` members are omitted, exactly like JSON.stringify does.
       if (item !== undefined) {
-        result[key] = canonicalizeAt(item, childPath(path, key), ancestors);
+        defineMember(result, key, canonicalizeAt(item, childPath(path, key), ancestors));
       }
     }
     return result;
@@ -128,7 +142,9 @@ export function jsonEqual(a: JsonValue, b: JsonValue): boolean {
     if (keysA.length !== Object.keys(b).length) {
       return false;
     }
-    return keysA.every((key) => key in b && jsonEqual(a[key] as JsonValue, b[key] as JsonValue));
+    return keysA.every(
+      (key) => Object.hasOwn(b, key) && jsonEqual(a[key] as JsonValue, b[key] as JsonValue),
+    );
   }
   return false;
 }

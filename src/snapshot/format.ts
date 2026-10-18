@@ -48,14 +48,26 @@ function sortByKey<T extends JsonObject>(items: readonly T[], key: (item: T) => 
 }
 
 function normalizeTool(tool: ToolSnapshot): ToolSnapshot {
-  const result: JsonObject = { ...asObject(tool) };
+  const result: JsonObject = { ...tool };
   for (const field of ['inputSchema', 'outputSchema'] as const) {
-    const schema = result[field];
+    const schema = Object.hasOwn(result, field) ? result[field] : undefined;
     if (schema !== undefined) {
       result[field] = normalizeSchema(schema);
     }
   }
   return result as ToolSnapshot;
+}
+
+/** The shape {@link snapshotFileSchema} guarantees, over canonical JSON. */
+interface SnapshotData {
+  readonly protocol: Snapshot['protocol'];
+  readonly server: JsonObject;
+  readonly capabilities: JsonObject;
+  readonly instructions?: string;
+  readonly tools: readonly ToolSnapshot[];
+  readonly prompts: readonly PromptSnapshot[];
+  readonly resources: readonly ResourceSnapshot[];
+  readonly resourceTemplates: readonly ResourceTemplateSnapshot[];
 }
 
 /** Raw material for {@link createSnapshot}, typically straight from the SDK. */
@@ -85,31 +97,26 @@ export interface SnapshotInput {
  * @throws {TypeError} if an element is missing its identity field or is not JSON.
  */
 export function createSnapshot(input: SnapshotInput): Snapshot {
-  const result = snapshotFileSchema.safeParse({ formatVersion: SNAPSHOT_FORMAT_VERSION, ...input });
+  // Canonicalise before validating, and build the snapshot from the canonical
+  // data rather than from the validator's output: the validator silently drops
+  // members named `__proto__`, which are legal JSON (and legal property names).
+  const data = asObject({ formatVersion: SNAPSHOT_FORMAT_VERSION, ...input });
+  const result = snapshotFileSchema.safeParse(data);
   if (!result.success) {
     throw new TypeError(`Invalid snapshot data:\n${z.prettifyError(result.error)}`);
   }
-  const parsed = result.data;
-  const tools = parsed.tools.map((tool) => normalizeTool(asObject(tool) as ToolSnapshot));
+  const valid = data as unknown as SnapshotData;
+  const tools = valid.tools.map(normalizeTool);
   return {
     formatVersion: SNAPSHOT_FORMAT_VERSION,
-    protocol: { era: parsed.protocol.era, version: parsed.protocol.version },
-    server: asObject(parsed.server),
-    capabilities: asObject(parsed.capabilities),
-    ...(parsed.instructions === undefined ? {} : { instructions: parsed.instructions }),
+    protocol: { era: valid.protocol.era, version: valid.protocol.version },
+    server: valid.server,
+    capabilities: valid.capabilities,
+    ...(valid.instructions === undefined ? {} : { instructions: valid.instructions }),
     tools: sortByKey(tools, (tool) => tool.name),
-    prompts: sortByKey(
-      parsed.prompts.map((prompt) => asObject(prompt) as PromptSnapshot),
-      (prompt) => prompt.name,
-    ),
-    resources: sortByKey(
-      parsed.resources.map((resource) => asObject(resource) as ResourceSnapshot),
-      (resource) => resource.uri,
-    ),
-    resourceTemplates: sortByKey(
-      parsed.resourceTemplates.map((template) => asObject(template) as ResourceTemplateSnapshot),
-      (template) => template.uriTemplate,
-    ),
+    prompts: sortByKey(valid.prompts, (prompt) => prompt.name),
+    resources: sortByKey(valid.resources, (resource) => resource.uri),
+    resourceTemplates: sortByKey(valid.resourceTemplates, (template) => template.uriTemplate),
   };
 }
 
@@ -158,5 +165,6 @@ export function parseSnapshot(text: string, source = '<snapshot>'): Snapshot {
       `not a valid mcp-contract snapshot:\n${z.prettifyError(result.error)}`,
     );
   }
-  return createSnapshot(result.data);
+  // Build from the parsed JSON, not from the validator's output (see createSnapshot).
+  return createSnapshot(data as SnapshotInput);
 }
