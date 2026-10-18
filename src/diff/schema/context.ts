@@ -88,8 +88,6 @@ export interface Context {
   depth: number;
   /** Remaining comparison steps; `exhausted` is also set when the depth limit is hit. */
   readonly budget: { remaining: number; exhausted: boolean; tooDeep: boolean };
-  /** Whether the two whole documents are equal (computed on first use). */
-  readonly rootsEqual: () => boolean;
   /** Memo for objects derived from schema nodes, keyed by node and purpose. */
   readonly derived: WeakMap<object, Map<string, JsonValue>>;
   /** Memo: does this reference point at the same definition, transitively, in both schemas? */

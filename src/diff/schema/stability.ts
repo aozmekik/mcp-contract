@@ -1,6 +1,8 @@
 /**
  * When does equal schema text imply equal meaning? Only when every reference
  * inside it resolves to equal definitions in both documents, transitively.
+ * The documents themselves always differ here: diffSchemas answers equal
+ * documents before it compares anything.
  */
 import { jsonEqual, type JsonValue } from '../../core/json.ts';
 import type { Context } from './context.ts';
@@ -12,13 +14,10 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 
 /**
  * True when an unresolvable reference provably means the same on both sides:
- * the whole documents are equal, or the same reference (resolved to the same
- * absolute URI) points outside both documents or at nothing in either.
+ * the same reference (resolved to the same absolute URI) points outside both
+ * documents, or at nothing in either.
  */
 export function unresolvedUnchanged(ctx: Context, before: Lookup, after: Lookup): boolean {
-  if (ctx.rootsEqual()) {
-    return true;
-  }
   if (before.ok || after.ok) {
     return false;
   }
@@ -37,7 +36,7 @@ export function unresolvedUnchanged(ctx: Context, before: Lookup, after: Lookup)
 /** Checks one reference target; queues the references the target itself contains. */
 function targetStable(ctx: Context, uri: string, pending: string[]): boolean {
   if (uri === DYNAMIC_REFERENCE || uri.startsWith('\u0000')) {
-    return ctx.rootsEqual();
+    return false; // Not followed, and the documents differ.
   }
   const before = ctx.oldDoc.lookup(uri);
   const after = ctx.newDoc.lookup(uri);

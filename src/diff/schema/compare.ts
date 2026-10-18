@@ -347,7 +347,8 @@ function compareOpaqueKeywords(ctx: Context, o: JsonObject, n: JsonObject, path:
       after !== undefined &&
       opaqueEquivalent(ctx, keyword, before, after, path)
     ) {
-      if (DYNAMIC_REFERENCE_KEYWORDS.has(keyword) && !ctx.rootsEqual()) {
+      // The documents differ (equal ones never get here), so the target may have.
+      if (DYNAMIC_REFERENCE_KEYWORDS.has(keyword)) {
         emit(ctx, 'unknown', 'ref-unresolved', path, `${keyword} cannot be followed`, {
           reason:
             'mcp-contract does not resolve dynamic references, and the schemas differ elsewhere, so its target may have changed',
@@ -391,11 +392,13 @@ export function diffSchemas(
   options: DiffSchemasOptions,
 ): SchemaChange[] {
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
-  let rootsEqual: boolean | undefined;
   const budget = { remaining: maxSteps, exhausted: false, tooDeep: false };
   const out: SchemaChange[] = [];
   let findings: Context['out'] = [];
   try {
+    if (jsonEqual(oldSchema, newSchema)) {
+      return []; // Equal documents: every reference means the same on both sides.
+    }
     const ctx: Context = {
       direction: options.direction,
       oldRoot: oldSchema,
@@ -409,7 +412,6 @@ export function diffSchemas(
       stableRefs: new Map(),
       scopes: new Map(),
       budget,
-      rootsEqual: () => (rootsEqual ??= jsonEqual(oldSchema, newSchema)),
       derived: new WeakMap(),
       out: findings,
       scope: [oldSchema],

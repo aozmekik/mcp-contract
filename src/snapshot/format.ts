@@ -1,12 +1,6 @@
 import * as z from 'zod';
 import { InvalidFileError } from '../core/errors.ts';
-import {
-  canonicalJson,
-  canonicalize,
-  compareCodeUnits,
-  isJsonObject,
-  type JsonObject,
-} from '../core/json.ts';
+import { canonicalize, compareCodeUnits, isJsonObject, type JsonObject } from '../core/json.ts';
 import type { ProtocolInfo } from '../connect/connect.ts';
 import { normalizeSchema } from '../schema/keywords.ts';
 import { VERSION } from '../version.ts';
@@ -46,9 +40,10 @@ function asObject(value: unknown): JsonObject {
   return canonical;
 }
 
+/** Sorts canonical items by identity, then by their (canonical) JSON text. */
 function sortByKey<T extends JsonObject>(items: readonly T[], key: (item: T) => string): T[] {
   return items
-    .map((item) => ({ item, key: key(item), canonical: canonicalJson(item) }))
+    .map((item) => ({ item, key: key(item), canonical: JSON.stringify(item) }))
     .sort((a, b) => compareCodeUnits(a.key, b.key) || compareCodeUnits(a.canonical, b.canonical))
     .map(({ item }) => item);
 }

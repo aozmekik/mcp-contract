@@ -22,7 +22,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from '../../core/json.ts';
-import { ANNOTATION_KEYWORDS, subschemasOf } from '../../schema/keywords.ts';
+import { ANNOTATION_KEYWORDS, forEachSubschema } from '../../schema/keywords.ts';
 import { get } from './context.ts';
 
 /** Why a reference has no target. */
@@ -227,16 +227,26 @@ export function indexDocument(root: JsonValue): SchemaDocument {
         register(anchors, `${here}#${anchor}`, node);
       }
     }
-    for (const subschema of subschemasOf(node)) {
+    forEachSubschema(node, (subschema) => {
       walk(subschema, here);
+    });
+  };
+
+  // Indexing walks the whole document, so it happens on first use only:
+  // documents without references never need it.
+  let rootBase = DEFAULT_BASE;
+  let indexed = false;
+  const ensureIndexed = (): void => {
+    if (!indexed) {
+      indexed = true;
+      walk(root, DEFAULT_BASE);
+      rootBase = isJsonObject(root) ? (bases.get(root) ?? DEFAULT_BASE) : DEFAULT_BASE;
+      register(resources, rootBase, root);
     }
   };
 
-  walk(root, DEFAULT_BASE);
-  const rootBase = isJsonObject(root) ? (bases.get(root) ?? DEFAULT_BASE) : DEFAULT_BASE;
-  register(resources, rootBase, root);
-
   const lookup = (uri: string): Lookup => {
+    ensureIndexed();
     const hash = uri.indexOf('#');
     const resourceUri = hash === -1 ? uri : uri.slice(0, hash);
     const fragment = hash === -1 ? '' : uri.slice(hash + 1);
@@ -285,6 +295,7 @@ export function indexDocument(root: JsonValue): SchemaDocument {
 
   /** Follows one reference written in `node`. */
   const follow = (node: JsonObject, ref: string): Lookup => {
+    ensureIndexed();
     const url = parseUri(ref, bases.get(node) ?? rootBase);
     const lookedUp: Lookup =
       url === undefined
@@ -359,9 +370,28 @@ export function indexDocument(root: JsonValue): SchemaDocument {
     return result;
   };
 
+  // Most generated schemas contain no reference at all; one scan of the
+  // document lets every later question about references return at once.
+  const containsReference = (value: JsonValue): boolean => {
+    if (typeof value !== 'object' || value === null) {
+      return false;
+    }
+    if (
+      !Array.isArray(value) &&
+      (Object.hasOwn(value, '$ref') ||
+        Object.hasOwn(value, '$dynamicRef') ||
+        Object.hasOwn(value, '$recursiveRef'))
+    ) {
+      return true;
+    }
+    return Object.values(value).some(containsReference);
+  };
+  let documentHasReferences: boolean | undefined;
+
   const referenceMemo = new WeakMap<object, readonly string[]>();
   const references = (value: JsonValue): readonly string[] => {
-    if (typeof value !== 'object' || value === null) {
+    documentHasReferences ??= containsReference(root);
+    if (!documentHasReferences || typeof value !== 'object' || value === null) {
       return [];
     }
     const cached = referenceMemo.get(value);
@@ -372,6 +402,7 @@ export function indexDocument(root: JsonValue): SchemaDocument {
     if (isJsonObject(value)) {
       const ref = get(value, '$ref');
       if (typeof ref === 'string') {
+        ensureIndexed();
         found.add(parseUri(ref, bases.get(value) ?? rootBase)?.href ?? `\u0000invalid ${ref}`);
       }
       if (get(value, '$dynamicRef') !== undefined || get(value, '$recursiveRef') !== undefined) {
@@ -389,6 +420,7 @@ export function indexDocument(root: JsonValue): SchemaDocument {
   return {
     root,
     get hasUnindexedIds() {
+      ensureIndexed();
       return hasUnindexedIds;
     },
     resolve,

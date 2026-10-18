@@ -102,14 +102,33 @@ function mapKeyword(
   return value;
 }
 
-/** The direct subschemas of `schema`, in keyword order. */
-export function subschemasOf(schema: JsonValue): JsonValue[] {
-  const found: JsonValue[] = [];
-  mapSubschemas(schema, (subschema) => {
-    found.push(subschema);
-    return subschema;
-  });
-  return found;
+/** Calls `fn` for every direct subschema of `schema`, in keyword order, without copying. */
+export function forEachSubschema(schema: JsonValue, fn: (subschema: JsonValue) => void): void {
+  if (!isJsonObject(schema)) {
+    return;
+  }
+  for (const [keyword, value] of Object.entries(schema)) {
+    if (SINGLE_SUBSCHEMA_KEYWORDS.has(keyword)) {
+      fn(value);
+    } else if (keyword === 'items') {
+      if (Array.isArray(value)) {
+        value.forEach(fn);
+      } else {
+        fn(value);
+      }
+    } else if (ARRAY_SUBSCHEMA_KEYWORDS.has(keyword) && Array.isArray(value)) {
+      value.forEach(fn);
+    } else if (
+      (MAP_SUBSCHEMA_KEYWORDS.has(keyword) || keyword === 'dependencies') &&
+      isJsonObject(value)
+    ) {
+      for (const member of Object.values(value)) {
+        if (!(keyword === 'dependencies' && Array.isArray(member))) {
+          fn(member);
+        }
+      }
+    }
+  }
 }
 
 function sortedUniqueStrings(values: readonly JsonValue[]): JsonValue[] | undefined {

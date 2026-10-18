@@ -17,7 +17,7 @@
  * for the values it accepts. Conclusions that only consider the values
  * (containment, an always-true member) are then `unknown`.
  */
-import { canonicalJson, isJsonObject, type JsonObject, type JsonValue } from '../../core/json.ts';
+import { isJsonObject, type JsonObject, type JsonValue } from '../../core/json.ts';
 import { ANNOTATION_KEYWORDS } from '../../schema/keywords.ts';
 import { compareAnnotations } from './annotations.ts';
 import {
@@ -120,7 +120,9 @@ interface Matching {
 /**
  * Pairs alternatives that accept the same values. Identical alternatives are
  * paired first through a hash map, so reordering a large union costs linear
- * time; only the remaining ones are compared with each other.
+ * time; only the remaining ones are compared with each other. The key is
+ * plain JSON text: snapshots are canonical, and an alternative whose keys are
+ * merely in another order still finds its partner in the second pass.
  */
 function matchEquivalent(
   ctx: Context,
@@ -133,11 +135,11 @@ function matchEquivalent(
   const pairs: (readonly [JsonValue, JsonValue])[] = [];
   const byText = new Map<string, number[]>();
   after.forEach((branch, position) => {
-    const text = canonicalJson(branch);
+    const text = JSON.stringify(branch);
     byText.set(text, [...(byText.get(text) ?? []), position]);
   });
   before.forEach((branch, index) => {
-    const candidates = byText.get(canonicalJson(branch)) ?? [];
+    const candidates = byText.get(JSON.stringify(branch)) ?? [];
     const position = candidates.find((candidate) => !used.has(candidate));
     const match = position === undefined ? undefined : after[position];
     if (position !== undefined && match !== undefined && sameMeaning(ctx, branch, match)) {
