@@ -69,7 +69,12 @@ describe('examples over stdio', () => {
   });
 
   it('negotiates the current protocol revision with the v2 SDK server', () => {
-    expect(v1.protocol).toEqual({ era: 'modern', version: '2026-07-28' });
+    expect(v1.protocol).toEqual({
+      era: 'modern',
+      version: '2026-07-28',
+      negotiation: 'auto',
+      supportedVersions: ['2026-07-28'],
+    });
     expect(v1.tools.map((tool) => tool.name)).toEqual([
       'create_note',
       'delete_note',
@@ -118,14 +123,18 @@ describe('examples over Streamable HTTP', () => {
     expect(classification(httpV1, httpV2)).toEqual(EXPECTED);
   });
 
-  it('also serves 2025-era clients; only the protocol differs', async () => {
+  it('also serves 2025-era clients; revisions negotiated differently are not compared', async () => {
     const [modern, legacy] = await Promise.all([
       snapshotServer(target(0)),
       snapshotServer(target(0), { protocol: 'legacy' }),
     ]);
-    expect(legacy.protocol).toEqual({ era: 'legacy', version: '2025-11-25' });
+    expect(legacy.protocol).toEqual({
+      era: 'legacy',
+      version: '2025-11-25',
+      negotiation: 'legacy',
+    });
     expect(classification(modern, legacy)).toEqual([
-      ['unknown', 'protocol-changed', 'server', 'notes', 'protocol', undefined],
+      ['non-breaking', 'protocol-not-compared', 'server', 'notes', 'protocol', undefined],
     ]);
   });
 

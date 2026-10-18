@@ -14,6 +14,7 @@ export {
   DEFAULT_TIMEOUT_MS,
   type ConnectOptions,
   type HttpTarget,
+  type NegotiationKind,
   type ProtocolInfo,
   type ProtocolMode,
   type ServerConnection,

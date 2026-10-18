@@ -64,12 +64,26 @@ export type ServerTarget = StdioTarget | HttpTarget | TransportTarget;
  */
 export type ProtocolMode = 'auto' | 'legacy' | { readonly pin: string };
 
-/** The protocol revision a connection negotiated. */
+/** How a revision was negotiated: the kind of {@link ProtocolMode} that was used. */
+export type NegotiationKind = 'auto' | 'legacy' | 'pin';
+
+/** The protocol revision a connection negotiated, and how. */
 export interface ProtocolInfo {
   /** `legacy` for the initialize-based revisions (2025-11-25 and earlier), `modern` for 2026-07-28+. */
   readonly era: ProtocolEra;
   /** The negotiated revision, e.g. `2025-11-25` or `2026-07-28`. */
   readonly version: string;
+  /**
+   * The negotiation mode that produced {@link version}. The negotiated revision
+   * depends on it as much as on the server, so snapshots taken with different
+   * modes are not comparable on this point. Absent in older snapshots.
+   */
+  readonly negotiation?: NegotiationKind;
+  /**
+   * The revisions the server listed in its `server/discover` result, when the
+   * negotiation asked for it (modern servers under `auto` or a pin).
+   */
+  readonly supportedVersions?: readonly string[];
 }
 
 /** Options for {@link connectServer}. */
@@ -228,9 +242,10 @@ export async function connectServer(
   }
   const { transport, stderrTail } = prepareTransport(target);
   const description = describeTarget(target);
+  const mode = negotiationMode(options.protocol);
   const client = new Client(
     { name: 'mcp-contract', version: VERSION },
-    { versionNegotiation: { mode: negotiationMode(options.protocol) } },
+    { versionNegotiation: { mode } },
   );
 
   // The SDK does not watch the signal while it probes a stdio server on a
@@ -264,11 +279,19 @@ export async function connectServer(
     });
   }
 
+  const kind: NegotiationKind = typeof mode === 'string' ? mode : 'pin';
+  const supportedVersions = client.getDiscoverResult()?.supportedVersions;
+
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => (closing ??= closeQuietly(client, transport));
   return {
     client,
-    protocol: { era, version },
+    protocol: {
+      era,
+      version,
+      negotiation: kind,
+      ...(supportedVersions === undefined ? {} : { supportedVersions: [...supportedVersions] }),
+    },
     description,
     timeoutMs,
     signal: options.signal,

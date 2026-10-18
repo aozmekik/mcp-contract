@@ -31,6 +31,10 @@
   ],
   "protocol": {
     "era": "modern",
+    "negotiation": "auto",
+    "supportedVersions": [
+      "2026-07-28"
+    ],
     "version": "2026-07-28"
   },
   "resourceTemplates": [

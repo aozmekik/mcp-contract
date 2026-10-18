@@ -74,7 +74,11 @@ describe('captureSnapshot', () => {
     expect(snapshot.resources).toHaveLength(1);
     expect(snapshot.server).toEqual({ name: 'paged', version: '3.1.0' });
     expect(snapshot.instructions).toBe('Read the docs.');
-    expect(snapshot.protocol).toEqual({ era: 'legacy', version: '2025-11-25' });
+    expect(snapshot.protocol).toEqual({
+      era: 'legacy',
+      version: '2025-11-25',
+      negotiation: 'legacy',
+    });
     expect(Object.fromEntries(calls)).toEqual({
       'tools/list': 3,
       'prompts/list': 3,

@@ -116,6 +116,33 @@ describe('serializeSnapshot', () => {
   });
 });
 
+describe('protocol information', () => {
+  it('keeps the negotiation mode and sorts the supported revisions', () => {
+    const snapshot = snapshotOf({
+      protocol: {
+        era: 'modern',
+        version: '2026-07-28',
+        negotiation: 'pin',
+        supportedVersions: ['2027-01-01', '2026-07-28', '2026-07-28'],
+      },
+    });
+    expect(snapshot.protocol).toEqual({
+      era: 'modern',
+      version: '2026-07-28',
+      negotiation: 'pin',
+      supportedVersions: ['2026-07-28', '2027-01-01'],
+    });
+    expect(parseSnapshot(serializeSnapshot(snapshot)).protocol).toEqual(snapshot.protocol);
+  });
+
+  it('still reads snapshots that record only the era and revision', () => {
+    const text = serializeSnapshot(
+      snapshotOf({ protocol: { era: 'legacy', version: '2025-11-25' } }),
+    );
+    expect(parseSnapshot(text).protocol).toEqual({ era: 'legacy', version: '2025-11-25' });
+  });
+});
+
 describe('members named __proto__', () => {
   it('survive parsing, normalisation and serialisation', () => {
     const text = serializeSnapshot(snapshotOf({ tools: [tool('t')] })).replace(

@@ -7,6 +7,7 @@ import {
   isJsonObject,
   type JsonObject,
 } from '../core/json.ts';
+import type { ProtocolInfo } from '../connect/connect.ts';
 import { normalizeSchema } from '../schema/keywords.ts';
 import { VERSION } from '../version.ts';
 import {
@@ -22,7 +23,12 @@ const objectSchema = z.record(z.string(), z.unknown());
 
 const snapshotFileSchema = z.object({
   formatVersion: z.number(),
-  protocol: z.object({ era: z.enum(['legacy', 'modern']), version: z.string() }),
+  protocol: z.object({
+    era: z.enum(['legacy', 'modern']),
+    version: z.string(),
+    negotiation: z.enum(['auto', 'legacy', 'pin']).optional(),
+    supportedVersions: z.array(z.string()).optional(),
+  }),
   server: objectSchema,
   capabilities: objectSchema,
   instructions: z.string().optional(),
@@ -58,9 +64,22 @@ function normalizeTool(tool: ToolSnapshot): ToolSnapshot {
   return result as ToolSnapshot;
 }
 
+/** Keeps the known protocol fields; supported versions are a set, so they are sorted. */
+function normalizeProtocol(protocol: ProtocolInfo): ProtocolInfo {
+  const { era, version, negotiation, supportedVersions } = protocol;
+  return {
+    era,
+    version,
+    ...(negotiation === undefined ? {} : { negotiation }),
+    ...(supportedVersions === undefined
+      ? {}
+      : { supportedVersions: [...new Set(supportedVersions)].sort(compareCodeUnits) }),
+  };
+}
+
 /** The shape {@link snapshotFileSchema} guarantees, over canonical JSON. */
 interface SnapshotData {
-  readonly protocol: Snapshot['protocol'];
+  readonly protocol: ProtocolInfo;
   readonly server: JsonObject;
   readonly capabilities: JsonObject;
   readonly instructions?: string;
@@ -72,7 +91,7 @@ interface SnapshotData {
 
 /** Raw material for {@link createSnapshot}, typically straight from the SDK. */
 export interface SnapshotInput {
-  /** Negotiated protocol revision. */
+  /** Negotiated protocol revision, and how it was negotiated. */
   readonly protocol: Snapshot['protocol'];
   /** Server `Implementation` info. */
   readonly server: unknown;
@@ -109,7 +128,7 @@ export function createSnapshot(input: SnapshotInput): Snapshot {
   const tools = valid.tools.map(normalizeTool);
   return {
     formatVersion: SNAPSHOT_FORMAT_VERSION,
-    protocol: { era: valid.protocol.era, version: valid.protocol.version },
+    protocol: normalizeProtocol(valid.protocol),
     server: valid.server,
     capabilities: valid.capabilities,
     ...(valid.instructions === undefined ? {} : { instructions: valid.instructions }),

@@ -254,6 +254,73 @@ describe('server', () => {
     ]);
   });
 
+  describe('protocol', () => {
+    const modern = (supportedVersions?: readonly string[], version = '2026-07-28') => ({
+      protocol: {
+        era: 'modern' as const,
+        version,
+        negotiation: 'auto' as const,
+        ...(supportedVersions === undefined ? {} : { supportedVersions }),
+      },
+    });
+    const legacy = (negotiation: 'auto' | 'legacy' | undefined, version = '2025-11-25') => ({
+      protocol: {
+        era: 'legacy' as const,
+        version,
+        ...(negotiation === undefined ? {} : { negotiation }),
+      },
+    });
+
+    it('compares the revisions the server supports, not the one negotiated', () => {
+      expect(rows(modern(['2026-07-28', '2027-01-01']), modern(['2027-01-01']))).toEqual([
+        ['breaking', 'protocol-version-removed', 'test', 'protocol'],
+      ]);
+      expect(rows(modern(['2026-07-28']), modern(['2026-07-28', '2027-01-01']))).toEqual([
+        ['non-breaking', 'protocol-version-added', 'test', 'protocol'],
+      ]);
+      // A newer client negotiating a newer revision of an unchanged server.
+      expect(
+        rows(
+          modern(['2026-07-28', '2027-01-01']),
+          modern(['2027-01-01', '2026-07-28'], '2027-01-01'),
+        ),
+      ).toEqual([['non-breaking', 'protocol-changed', 'test', 'protocol']]);
+      expect(rows(modern(['2026-07-28']), modern(['2026-07-28']))).toEqual([]);
+    });
+
+    it('does not compare revisions negotiated with different modes', () => {
+      const [change] = diffSnapshots(
+        snapshotOf(modern(['2026-07-28'])),
+        snapshotOf(legacy('legacy')),
+      ).changes;
+      expect(change).toMatchObject({ severity: 'non-breaking', code: 'protocol-not-compared' });
+      expect(change?.message).toContain('different --protocol modes (auto, legacy)');
+    });
+
+    it('treats a modern server that falls back to the 2025 handshake as losing revisions', () => {
+      expect(rows(modern(['2026-07-28']), legacy('auto'))).toEqual([
+        ['breaking', 'protocol-version-removed', 'test', 'protocol'],
+      ]);
+    });
+
+    it('reports other negotiated revision changes as unknown', () => {
+      expect(rows(legacy('legacy', '2025-06-18'), legacy('legacy'))).toEqual([
+        ['unknown', 'protocol-changed', 'test', 'protocol'],
+      ]);
+      // Snapshots from before the negotiation mode was recorded.
+      expect(rows(legacy(undefined), modern(['2026-07-28']))).toEqual([
+        ['unknown', 'protocol-changed', 'test', 'protocol'],
+      ]);
+      const [upgrade] = diffSnapshots(
+        snapshotOf(legacy('auto')),
+        snapshotOf(modern(['2026-07-28'])),
+      ).changes;
+      expect(upgrade?.message).toContain(
+        'whether 2025-era clients can still connect is not checked',
+      );
+    });
+  });
+
   it('shows short values inline in the message', () => {
     const [change] = diffSnapshots(
       snapshotOf({ server: { name: 's', version: '1.0.0' } }),

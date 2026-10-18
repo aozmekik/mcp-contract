@@ -50,6 +50,9 @@ export type ChangeCode =
   // Server
   | 'server-info-changed'
   | 'protocol-changed'
+  | 'protocol-version-added'
+  | 'protocol-version-removed'
+  | 'protocol-not-compared'
   | 'instructions-changed'
   | 'capability-added'
   | 'capability-removed'

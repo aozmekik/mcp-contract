@@ -6,6 +6,7 @@ import {
   type JsonValue,
 } from '../core/json.ts';
 import { normalizeSnapshot } from '../snapshot/format.ts';
+import type { ProtocolInfo } from '../connect/connect.ts';
 import type { Snapshot } from '../snapshot/model.ts';
 import {
   summarize,
@@ -528,6 +529,98 @@ function compareCapabilities(
   }
 }
 
+function describeRevision(protocol: ProtocolInfo): string {
+  return `${protocol.version} (${protocol.era})`;
+}
+
+/**
+ * The negotiated revision depends on the client's negotiation mode as well as
+ * on the server, so revisions are compared through what the server says it
+ * supports (`server/discover`) whenever both snapshots know it, and are not
+ * compared at all when the snapshots were negotiated differently.
+ */
+function compareProtocol(scope: Scope, before: ProtocolInfo, after: ProtocolInfo): void {
+  const details = { location: 'protocol' };
+  const oldSupported = before.supportedVersions;
+  const newSupported = after.supportedVersions;
+  if (oldSupported !== undefined && newSupported !== undefined) {
+    for (const version of oldSupported.filter((v) => !newSupported.includes(v))) {
+      push(
+        scope,
+        'breaking',
+        'protocol-version-removed',
+        `revision ${version} is no longer supported; clients limited to it can no longer connect`,
+        { ...details, before: version },
+      );
+    }
+    for (const version of newSupported.filter((v) => !oldSupported.includes(v))) {
+      push(
+        scope,
+        'non-breaking',
+        'protocol-version-added',
+        `revision ${version} is now supported`,
+        {
+          ...details,
+          after: version,
+        },
+      );
+    }
+    if (before.version !== after.version && sameStrings(oldSupported, newSupported)) {
+      push(
+        scope,
+        'non-breaking',
+        'protocol-changed',
+        `negotiated revision changed from ${before.version} to ${after.version}, but the server supports the same revisions; the difference comes from the client (mcp-contract and its SDK)`,
+        { ...details, before: before.version, after: after.version },
+      );
+    }
+    return;
+  }
+  if (before.version === after.version && before.era === after.era) {
+    return;
+  }
+  const oldMode = before.negotiation;
+  const newMode = after.negotiation;
+  if (oldMode !== undefined && newMode !== undefined && oldMode !== newMode) {
+    push(
+      scope,
+      'non-breaking',
+      'protocol-not-compared',
+      `the snapshots were negotiated with different --protocol modes (${oldMode}, ${newMode}), so their revisions ${describeRevision(before)} and ${describeRevision(after)} are not compared; take both with the same mode to compare them`,
+      { ...details, before: before.version, after: after.version },
+    );
+    return;
+  }
+  if (oldSupported !== undefined && after.era === 'legacy' && newMode === 'auto') {
+    for (const version of oldSupported) {
+      push(
+        scope,
+        'breaking',
+        'protocol-version-removed',
+        `revision ${version} is no longer supported (the server no longer answers server/discover and negotiated ${after.version}); clients limited to it can no longer connect`,
+        { ...details, before: version },
+      );
+    }
+    return;
+  }
+  const change = `negotiated protocol changed from ${describeRevision(before)} to ${describeRevision(after)}`;
+  const cause =
+    newSupported !== undefined && before.era === 'legacy'
+      ? 'whether 2025-era clients can still connect is not checked (compare snapshots taken with --protocol legacy for that)'
+      : oldMode !== undefined && oldMode === newMode
+        ? `with the same --protocol mode (${oldMode}), so the revisions the server supports changed, or the client offered a different one (after an mcp-contract upgrade)`
+        : 'the revisions the server supports, or the way the snapshots were negotiated, changed';
+  push(scope, 'unknown', 'protocol-changed', `${change}; ${cause}`, {
+    ...details,
+    before: before.version,
+    after: after.version,
+  });
+}
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value) => b.includes(value));
+}
+
 function compareServer(scope: Scope, before: Snapshot, after: Snapshot): void {
   const keys = [...new Set([...Object.keys(before.server), ...Object.keys(after.server)])].sort(
     compareCodeUnits,
@@ -535,24 +628,7 @@ function compareServer(scope: Scope, before: Snapshot, after: Snapshot): void {
   for (const key of keys) {
     compareInfo(scope, before.server, after.server, key, 'server-info-changed', 'server');
   }
-  if (
-    before.protocol.version !== after.protocol.version ||
-    before.protocol.era !== after.protocol.era
-  ) {
-    const describe = (snapshot: Snapshot): string =>
-      `${snapshot.protocol.version} (${snapshot.protocol.era})`;
-    push(
-      scope,
-      'unknown',
-      'protocol-changed',
-      `negotiated protocol changed from ${describe(before)} to ${describe(after)}; clients limited to the old revision may not be able to connect`,
-      {
-        location: 'protocol',
-        before: before.protocol.version,
-        after: after.protocol.version,
-      },
-    );
-  }
+  compareProtocol(scope, before.protocol, after.protocol);
   compareCapabilities(scope, before.capabilities, after.capabilities, '');
   if (before.instructions !== after.instructions) {
     push(

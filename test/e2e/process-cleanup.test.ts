@@ -64,7 +64,12 @@ describe('child process cleanup', () => {
   it('terminates the server and the protocol probe after a successful snapshot', async () => {
     const snapshot = await snapshotServer(fixture('ok'));
     expect(snapshot.tools.map((tool) => tool.name)).toEqual(['echo']);
-    expect(snapshot.protocol).toEqual({ era: 'modern', version: '2026-07-28' });
+    expect(snapshot.protocol).toEqual({
+      era: 'modern',
+      version: '2026-07-28',
+      negotiation: 'auto',
+      supportedVersions: ['2026-07-28'],
+    });
     await expectAllExited(2); // probe sibling + session process
   });
 
