@@ -328,4 +328,20 @@ describe('results', () => {
     expect(failingChanges(result).map((change) => change.code)).toEqual(['tool-removed']);
     expect(failingChanges(result, 'any')).toHaveLength(2);
   });
+
+  it('fails an incomplete schema analysis at every threshold', () => {
+    const schema = (maximum: number): JsonObject => ({
+      type: 'object',
+      properties: { a: { type: 'integer', maximum }, b: { type: 'string' } },
+    });
+    const result = diffSnapshots(
+      snapshotOf({ tools: [tool('t', { inputSchema: schema(5) })] }),
+      snapshotOf({ tools: [tool('t', { inputSchema: schema(3) })] }),
+      { maxSchemaSteps: 1 },
+    );
+    expect(result.changes.map((change) => change.code)).toEqual(['schema-too-complex']);
+    expect(failingChanges(result, 'breaking').map((change) => change.code)).toEqual([
+      'schema-too-complex',
+    ]);
+  });
 });

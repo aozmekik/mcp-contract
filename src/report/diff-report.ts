@@ -1,6 +1,7 @@
 import {
   DEFAULT_FAIL_ON,
   failingChanges,
+  severityFails,
   type Change,
   type DiffResult,
   type FailOn,
@@ -61,13 +62,16 @@ function summaryLine(result: DiffResult): string {
 }
 
 function verdict(result: DiffResult, failOn: FailOn): { passed: boolean; text: string } {
-  const failing = failingChanges(result, failOn).length;
-  return failing === 0
-    ? { passed: true, text: `PASS (fail-on: ${failOn})` }
-    : {
-        passed: false,
-        text: `FAIL: ${failing} ${failing === 1 ? 'change' : 'changes'} at or above the fail-on threshold (${failOn})`,
-      };
+  const failing = failingChanges(result, failOn);
+  if (failing.length === 0) {
+    return { passed: true, text: `PASS (fail-on: ${failOn})` };
+  }
+  const incomplete = failing.some((change) => !severityFails(change.severity, failOn));
+  const count = `${failing.length} ${failing.length === 1 ? 'change' : 'changes'}`;
+  return {
+    passed: false,
+    text: `FAIL: ${count} at or above the fail-on threshold (${failOn})${incomplete ? '; an incomplete schema analysis always fails' : ''}`,
+  };
 }
 
 /** Human-readable report grouped by element, optionally colored. */

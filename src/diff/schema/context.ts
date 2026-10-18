@@ -7,6 +7,7 @@
  */
 import { jsonEqual, type JsonObject, type JsonValue } from '../../core/json.ts';
 import type { ChangeCode, SchemaDirection, Severity } from '../model.ts';
+import type { SchemaDocument } from './refs.ts';
 
 /** A classified difference inside one schema. */
 export interface SchemaChange {
@@ -48,18 +49,49 @@ export type Step =
   | { readonly kind: 'additional' }
   | { readonly kind: 'names' };
 
+/**
+ * The question a comparison answers. `report` collects the findings of the
+ * run; `equivalent` and `compatible` are the yes/no questions that pair union
+ * alternatives and check coverage. Cycle hypotheses are kept per question: a
+ * pair assumed compatible while reporting cannot be assumed equivalent.
+ */
+export type Judgment = 'report' | 'equivalent' | 'compatible';
+
+/** Bits of {@link Context.closing}. */
+export const CLOSING_PROPERTIES = 1;
+/** Bits of {@link Context.closing}. */
+export const CLOSING_ITEMS = 2;
+
 /** Mutable state of one {@link diffSchemas} run. */
 export interface Context {
   /** Direction under analysis. */
   readonly direction: SchemaDirection;
-  /** Root of the old schema, for `$ref` resolution. */
+  /** Root of the old schema. */
   readonly oldRoot: JsonValue;
-  /** Root of the new schema, for `$ref` resolution. */
+  /** Root of the new schema. */
   readonly newRoot: JsonValue;
-  /** Pairs currently being compared (coinductive cycle detection). */
+  /** The old schema, indexed for `$ref` resolution. */
+  readonly oldDoc: SchemaDocument;
+  /** The new schema, indexed for `$ref` resolution. */
+  readonly newDoc: SchemaDocument;
+  /** Pairs currently being compared, per judgment (coinductive cycle detection). */
   readonly stack: Set<string>;
-  /** Remaining comparison steps. */
-  readonly budget: { remaining: number; exhausted: boolean };
+  /** The question the current comparison answers. */
+  judgment: Judgment;
+  /**
+   * Set while an `unevaluatedProperties` ({@link CLOSING_PROPERTIES}) or
+   * `unevaluatedItems` ({@link CLOSING_ITEMS}) keyword whose effect is not
+   * modelled applies at the current instance location, on either side.
+   */
+  closing: number;
+  /** Nesting depth of the current comparison. */
+  depth: number;
+  /** Remaining comparison steps; `exhausted` is also set when the depth limit is hit. */
+  readonly budget: { remaining: number; exhausted: boolean; tooDeep: boolean };
+  /** Whether the two whole documents are equal (computed on first use). */
+  readonly rootsEqual: () => boolean;
+  /** Memo for objects derived from schema nodes, keyed by node and purpose. */
+  readonly derived: WeakMap<object, Map<string, JsonValue>>;
   /** Memo: does this reference point at the same definition, transitively, in both schemas? */
   readonly stableRefs: Map<string, boolean>;
   /** Memo: child scopes by parent scope key and step, so equal scopes share one array. */
@@ -156,6 +188,35 @@ export function scratch(ctx: Context, fn: () => void): Finding[] {
   }
 }
 
+/** Read through a function: comparisons mutate the budget behind the type checker's back. */
+function exhausted(ctx: Context): boolean {
+  return ctx.budget.exhausted;
+}
+
+/**
+ * Answers a yes/no question about `a` and `b` with a private findings buffer
+ * and its own cycle hypotheses. A question the budget cut short is answered
+ * "no", because the part that was not compared might differ.
+ */
+function ask(
+  ctx: Context,
+  judgment: Exclude<Judgment, 'report'>,
+  accept: (finding: Finding) => boolean,
+  run: () => void,
+): boolean {
+  if (exhausted(ctx)) {
+    return false;
+  }
+  const saved = ctx.judgment;
+  ctx.judgment = judgment;
+  try {
+    const findings = scratch(ctx, run);
+    return !exhausted(ctx) && findings.every(accept);
+  } finally {
+    ctx.judgment = saved;
+  }
+}
+
 /** True when the two schemas accept exactly the same values (annotations may differ). */
 export function equivalent(
   ctx: Context,
@@ -164,9 +225,14 @@ export function equivalent(
   path: string,
   step?: Step,
 ): boolean {
-  return scratch(ctx, () => {
-    ctx.compare(a, b, path, step);
-  }).every((finding) => finding.effect === 'annotation');
+  return ask(
+    ctx,
+    'equivalent',
+    (finding) => finding.effect === 'annotation',
+    () => {
+      ctx.compare(a, b, path, step);
+    },
+  );
 }
 
 /** True when replacing `a` by `b` is non-breaking in the context's direction. */
@@ -177,9 +243,34 @@ export function compatible(
   path: string,
   step?: Step,
 ): boolean {
-  return scratch(ctx, () => {
-    ctx.compare(a, b, path, step);
-  }).every((finding) => finding.severity === 'non-breaking');
+  return ask(
+    ctx,
+    'compatible',
+    (finding) => finding.severity === 'non-breaking',
+    () => {
+      ctx.compare(a, b, path, step);
+    },
+  );
+}
+
+/** Returns the object derived from `node` for `purpose`, computing it once per run. */
+export function derive<T extends JsonValue>(
+  ctx: Context,
+  node: JsonObject,
+  purpose: string,
+  compute: () => T,
+): T {
+  let entries = ctx.derived.get(node);
+  if (entries === undefined) {
+    entries = new Map();
+    ctx.derived.set(node, entries);
+  }
+  let value = entries.get(purpose) as T | undefined;
+  if (value === undefined) {
+    value = compute();
+    entries.set(purpose, value);
+  }
+  return value;
 }
 
 const identities = new WeakMap<object, number>();

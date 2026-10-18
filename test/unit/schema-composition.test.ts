@@ -213,3 +213,102 @@ describe('assumption A1 is judged per instance location', () => {
     expect(change).toMatchObject({ severity: 'non-breaking', code: 'property-added', path: '$.b' });
   });
 });
+
+describe('recursion through unions', () => {
+  it('does not let a cycle hypothesis hide a change inside a oneOf alternative', () => {
+    // Found by a differential fuzz run: the change to `b` also changes the
+    // recursive alternative, which can flip which oneOf alternative matches.
+    const schema = (extra: JsonObject): JsonObject => ({
+      $ref: '#/$defs/d',
+      $defs: {
+        d: {
+          type: 'object',
+          properties: { b: { oneOf: [{}, { $ref: '#/$defs/d' }], ...extra } },
+          required: [],
+        },
+      },
+    });
+    expect(triples(schema({}), schema({ maximum: 0 }), 'output')).toEqual([
+      ['non-breaking', 'constraint-tightened', '$.b'],
+      ['unknown', 'alternatives-changed', '$.b'],
+    ]);
+    expect(triples(schema({}), schema({}), 'output')).toEqual([]);
+  });
+
+  it('reports a change in a recursive anyOf alternative where the recursion is unrolled', () => {
+    const schema = (maximum: number): JsonObject => ({
+      $ref: '#/$defs/d',
+      $defs: {
+        d: {
+          type: 'object',
+          properties: {
+            n: { type: 'integer', maximum },
+            next: { anyOf: [{ type: 'null' }, { $ref: '#/$defs/d' }] },
+          },
+        },
+      },
+    });
+    // The definition is unrolled once below the union, so the change is seen
+    // at the top level and inside the alternative.
+    expect(triples(schema(5), schema(3), 'input')).toEqual([
+      ['breaking', 'constraint-tightened', '$.n'],
+      ['breaking', 'constraint-tightened', '$.next.n'],
+    ]);
+  });
+});
+
+describe('large unions', () => {
+  const variant = (index: number, maxLength: number): JsonObject => ({
+    type: 'object',
+    additionalProperties: false,
+    required: ['op'],
+    properties: {
+      op: { const: `op_${index}` },
+      ...Object.fromEntries(
+        Array.from({ length: 15 }, (_, field) => [`f${field}`, { type: 'string', maxLength }]),
+      ),
+    },
+  });
+
+  it.each(['anyOf', 'oneOf'])(
+    'pairs identical %s alternatives in linear time, so a reordered union stays analysable',
+    (keyword) => {
+      const count = 120;
+      const before = { [keyword]: Array.from({ length: count }, (_, i) => variant(i, 100)) };
+      const after = {
+        [keyword]: Array.from({ length: count }, (_, i) =>
+          variant(i, i === count - 1 ? 50 : 100),
+        ).reverse(),
+      };
+      const changes = diffSchemas(before, after, { direction: 'input' });
+      expect(changes.map((change) => change.code)).not.toContain('schema-too-complex');
+      expect(changes.filter((change) => change.severity === 'breaking')).toHaveLength(15);
+    },
+  );
+
+  it('does not pair alternatives that look identical but refer to changed definitions', () => {
+    const schema = (type: string): JsonObject => ({
+      anyOf: [{ $ref: '#/$defs/a' }, { type: 'null' }],
+      $defs: { a: { type } },
+    });
+    expect(triples(schema('string'), schema('integer'), 'input')).toEqual([
+      ['breaking', 'type-narrowed', '$'],
+      ['non-breaking', 'type-widened', '$'],
+    ]);
+  });
+
+  it('answers "not equivalent" when the budget runs out while pairing', () => {
+    // Every alternative changed, so pairing needs semantic comparisons.
+    const before = { anyOf: Array.from({ length: 30 }, (_, i) => variant(i, 100)) };
+    const after = { anyOf: Array.from({ length: 30 }, (_, i) => variant(i, 200)) };
+    const changes = diffSchemas(before, after, { direction: 'input', maxSteps: 300 });
+    expect(changes.at(-1)).toMatchObject({ code: 'schema-too-complex', severity: 'unknown' });
+    expect(changes.every((change) => change.severity !== 'non-breaking')).toBe(true);
+    // With enough budget the same change is proven compatible.
+    expect(
+      diffSchemas(before, after, { direction: 'input', maxSteps: 200_000 }).every(
+        (change) => change.severity === 'non-breaking',
+      ),
+    ).toBe(true);
+  });
+});

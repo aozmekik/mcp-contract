@@ -148,9 +148,15 @@ export function severityFails(severity: Severity, failOn: FailOn): boolean {
   }
 }
 
-/** Returns the changes that fail a check under `failOn`. */
+/**
+ * Returns the changes that fail a check under `failOn`. A `schema-too-complex`
+ * change fails at every level: the analysis it stands for is incomplete, and
+ * the part that was not analysed may contain breaking changes.
+ */
 export function failingChanges(result: DiffResult, failOn: FailOn = DEFAULT_FAIL_ON): Change[] {
-  return result.changes.filter((change) => severityFails(change.severity, failOn));
+  return result.changes.filter(
+    (change) => change.code === 'schema-too-complex' || severityFails(change.severity, failOn),
+  );
 }
 
 /** Counts changes per severity. */

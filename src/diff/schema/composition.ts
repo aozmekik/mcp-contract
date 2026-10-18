@@ -11,12 +11,18 @@
  *   exclusivity (exactly one alternative matches) can flip either way when
  *   alternatives change, and mcp-contract does not compute overlaps;
  * - anything else is `unknown`.
+ *
+ * Under an `unevaluatedProperties`/`unevaluatedItems` keyword that is not
+ * modelled, a subschema also matters for the members it evaluates, not just
+ * for the values it accepts. Conclusions that only consider the values
+ * (containment, an always-true member) are then `unknown`.
  */
-import { isJsonObject, type JsonObject, type JsonValue } from '../../core/json.ts';
+import { canonicalJson, isJsonObject, type JsonObject, type JsonValue } from '../../core/json.ts';
 import { ANNOTATION_KEYWORDS } from '../../schema/keywords.ts';
 import { compareAnnotations } from './annotations.ts';
 import {
   compatible,
+  derive,
   emit,
   equivalent,
   formatValue,
@@ -28,6 +34,10 @@ import {
 } from './context.ts';
 import { STRUCTURAL_KEYWORDS } from './refs.ts';
 import { declaredTypes, enumValues } from './scalars.ts';
+import { sameMeaning } from './stability.ts';
+
+const CLOSING_REASON =
+  'unevaluatedProperties or unevaluatedItems applies here, and whether it still accepts a value depends on which subschemas evaluate which members, which mcp-contract does not track';
 
 type UnionKeyword = 'anyOf' | 'oneOf';
 
@@ -83,8 +93,12 @@ function hasCombinator(schema: JsonObject): boolean {
   return ['allOf', 'anyOf', 'oneOf', 'not', 'if'].some((keyword) => Object.hasOwn(schema, keyword));
 }
 
-/** Splits `{type: [a, b], ...}` into one alternative per type; exact, because `type` is a disjunction. */
-function expandTypeUnion(branch: JsonValue): JsonValue[] {
+/**
+ * Splits `{type: [a, b], ...}` into one alternative per type; exact, because
+ * `type` is a disjunction. The split alternatives are created once per run,
+ * so recursive comparisons recognise them as already visited.
+ */
+function expandTypeUnion(ctx: Context, branch: JsonValue): JsonValue[] {
   if (!isJsonObject(branch) || typeof branch.$ref === 'string' || hasCombinator(branch)) {
     return [branch];
   }
@@ -92,7 +106,9 @@ function expandTypeUnion(branch: JsonValue): JsonValue[] {
   if (!Array.isArray(types) || types.length < 2) {
     return [branch];
   }
-  return types.map((type) => ({ ...branch, type }));
+  return derive(ctx, branch, 'type-alternatives', () =>
+    types.map((type): JsonValue => ({ ...branch, type })),
+  );
 }
 
 interface Matching {
@@ -101,6 +117,11 @@ interface Matching {
   readonly newRest: readonly JsonValue[];
 }
 
+/**
+ * Pairs alternatives that accept the same values. Identical alternatives are
+ * paired first through a hash map, so reordering a large union costs linear
+ * time; only the remaining ones are compared with each other.
+ */
 function matchEquivalent(
   ctx: Context,
   before: readonly JsonValue[],
@@ -108,20 +129,39 @@ function matchEquivalent(
   path: string,
 ): Matching {
   const used = new Set<number>();
+  const paired = new Set<number>();
   const pairs: (readonly [JsonValue, JsonValue])[] = [];
+  const byText = new Map<string, number[]>();
+  after.forEach((branch, position) => {
+    const text = canonicalJson(branch);
+    byText.set(text, [...(byText.get(text) ?? []), position]);
+  });
+  before.forEach((branch, index) => {
+    const candidates = byText.get(canonicalJson(branch)) ?? [];
+    const position = candidates.find((candidate) => !used.has(candidate));
+    const match = position === undefined ? undefined : after[position];
+    if (position !== undefined && match !== undefined && sameMeaning(ctx, branch, match)) {
+      used.add(position);
+      paired.add(index);
+      pairs.push([branch, match]);
+    }
+  });
   const oldRest: JsonValue[] = [];
-  for (const branch of before) {
-    const index = after.findIndex(
-      (candidate, position) => !used.has(position) && equivalent(ctx, branch, candidate, path),
+  before.forEach((branch, index) => {
+    if (paired.has(index)) {
+      return;
+    }
+    const position = after.findIndex(
+      (candidate, at) => !used.has(at) && equivalent(ctx, branch, candidate, path),
     );
-    const match = after[index];
+    const match = after[position];
     if (match === undefined) {
       oldRest.push(branch);
     } else {
-      used.add(index);
+      used.add(position);
       pairs.push([branch, match]);
     }
-  }
+  });
   const newRest = after.filter((_, position) => !used.has(position));
   return { pairs, oldRest, newRest };
 }
@@ -144,14 +184,15 @@ function unionKeywordOf(schema: JsonObject): UnionKeyword | 'both' | undefined {
   return oneOf ? 'oneOf' : undefined;
 }
 
-function withoutAnnotations(schema: JsonObject): JsonObject {
-  const result: JsonObject = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (!ANNOTATION_KEYWORDS.has(key) && !STRUCTURAL_KEYWORDS.has(key)) {
-      result[key] = value;
-    }
-  }
-  return result;
+/** `schema` without annotations and identifiers; created once per node and run. */
+function withoutAnnotations(ctx: Context, schema: JsonObject): JsonObject {
+  return derive(ctx, schema, 'without-annotations', () =>
+    Object.fromEntries(
+      Object.entries(schema).filter(
+        ([key]) => !ANNOTATION_KEYWORDS.has(key) && !STRUCTURAL_KEYWORDS.has(key),
+      ),
+    ),
+  );
 }
 
 function compareUnion(
@@ -164,7 +205,9 @@ function compareUnion(
   // Splitting `type: [a, b]` into alternatives is exact for anyOf. For oneOf it
   // is not (integer and number overlap), so oneOf alternatives are kept whole.
   const expand = (branches: readonly JsonValue[]): JsonValue[] =>
-    keyword === 'anyOf' ? branches.flatMap(expandTypeUnion) : [...branches];
+    keyword === 'anyOf'
+      ? branches.flatMap((branch) => expandTypeUnion(ctx, branch))
+      : [...branches];
   const before = expand(beforeBranches);
   const after = expand(afterBranches);
   const { pairs, oldRest, newRest } = matchEquivalent(ctx, before, after, path);
@@ -204,15 +247,32 @@ function compareUnion(
         ctx.out.push({ ...finding, message: `${prefix}${finding.message}` });
       }
     }
+    // The pair is known not to be equivalent. When the detailed comparison
+    // still finds nothing, the difference lies in a recursive definition that
+    // is reported where it is first reached; inside a oneOf that report is not
+    // enough, because the change can flip which alternative matches.
+    if (keyword === 'oneOf' && findings.every((finding) => finding.effect === 'annotation')) {
+      emit(
+        ctx,
+        'unknown',
+        'alternatives-changed',
+        path,
+        `oneOf alternative ${describeBranch(onlyOld)} changed through a recursive reference`,
+        { reason: exclusivity },
+      );
+    }
     return;
   }
 
   // Input: every removed alternative must be contained in some new one.
   // Output: every added alternative must be contained in some old one.
+  // Containment says nothing about which members an alternative evaluates,
+  // so it proves nothing under a closing unevaluated* keyword.
+  const closing = ctx.closing !== 0;
   const coveredInput = (): boolean =>
-    oldRest.every((left) => after.some((right) => compatible(ctx, left, right, path)));
+    !closing && oldRest.every((left) => after.some((right) => compatible(ctx, left, right, path)));
   const coveredOutput = (): boolean =>
-    newRest.every((right) => before.some((left) => compatible(ctx, left, right, path)));
+    !closing && newRest.every((right) => before.some((left) => compatible(ctx, left, right, path)));
 
   if (oldRest.length === 0) {
     const what = `${keyword} ${plural(newRest.length, 'alternative')} added (${describeBranches(newRest)})`;
@@ -222,6 +282,8 @@ function compareUnion(
       } else {
         emit(ctx, 'unknown', 'alternatives-added', path, what, { reason: exclusivity });
       }
+    } else if (closing) {
+      emit(ctx, 'unknown', 'alternatives-added', path, what, { reason: CLOSING_REASON });
     } else if (!coveredOutput()) {
       emit(ctx, 'widen', 'alternatives-added', path, what);
     } else if (keyword === 'anyOf') {
@@ -241,6 +303,8 @@ function compareUnion(
       } else {
         emit(ctx, 'unknown', 'alternatives-removed', path, what, { reason: exclusivity });
       }
+    } else if (closing) {
+      emit(ctx, 'unknown', 'alternatives-removed', path, what, { reason: CLOSING_REASON });
     } else if (!coveredInput()) {
       emit(ctx, 'narrow', 'alternatives-removed', path, what);
     } else if (keyword === 'anyOf') {
@@ -267,7 +331,9 @@ function compareUnion(
       reason:
         keyword === 'oneOf'
           ? exclusivity
-          : 'mcp-contract cannot prove the new alternatives are compatible',
+          : closing
+            ? CLOSING_REASON
+            : 'mcp-contract cannot prove the new alternatives are compatible',
     });
   }
 }
@@ -332,7 +398,7 @@ export function liftUnion(ctx: Context, o: JsonObject, n: JsonObject, path: stri
     return false;
   }
   compareAnnotations(ctx, o, n, path);
-  const plain = [withoutAnnotations(plainSide)];
+  const plain = [withoutAnnotations(ctx, plainSide)];
   const before = oldKeyword === undefined ? plain : (branchesOf(o, keyword) ?? []);
   const after = newKeyword === undefined ? plain : (branchesOf(n, keyword) ?? []);
   compareUnion(ctx, keyword, before, after, path);
@@ -355,6 +421,19 @@ export function compareUnionKeyword(
   }
   const branches = before ?? after;
   if (branches === undefined) {
+    return;
+  }
+  if (ctx.closing !== 0) {
+    emit(
+      ctx,
+      'unknown',
+      before === undefined ? 'subschema-added' : 'subschema-removed',
+      path,
+      `${keyword} ${before === undefined ? 'added' : 'removed'} (${describeBranches(branches)})`,
+      {
+        reason: CLOSING_REASON,
+      },
+    );
     return;
   }
   // An anyOf with an alternative that accepts everything constrains nothing.
@@ -403,7 +482,7 @@ export function liftAllOf(ctx: Context, o: JsonObject, n: JsonObject, path: stri
     return false;
   }
   compareAnnotations(ctx, o, n, path);
-  const lifted = [withoutAnnotations(plain)];
+  const lifted = [withoutAnnotations(ctx, plain)];
   compareConjunction(
     ctx,
     oldHas ? (branchesOf(o, 'allOf') ?? []) : lifted,
@@ -426,8 +505,11 @@ function compareConjunction(
   for (const [left, right] of pairs) {
     ctx.compare(left, right, path);
   }
-  const removed = oldRest.filter((branch) => !equivalent(ctx, true, branch, path));
-  const added = newRest.filter((branch) => !equivalent(ctx, true, branch, path));
+  // A member that accepts everything changes nothing, unless an unevaluated*
+  // keyword sees the members it evaluates.
+  const closing = ctx.closing !== 0;
+  const removed = oldRest.filter((branch) => closing || !equivalent(ctx, true, branch, path));
+  const added = newRest.filter((branch) => closing || !equivalent(ctx, true, branch, path));
   const [onlyRemoved] = removed;
   const [onlyAdded] = added;
   if (
@@ -437,6 +519,10 @@ function compareConjunction(
     onlyAdded !== undefined
   ) {
     ctx.compare(onlyRemoved, onlyAdded, path);
+  } else if (closing && (removed.length > 0 || added.length > 0)) {
+    emit(ctx, 'unknown', 'composition-changed', path, 'allOf subschemas changed', {
+      reason: CLOSING_REASON,
+    });
   } else if (removed.length === 0 && added.length > 0) {
     emit(
       ctx,

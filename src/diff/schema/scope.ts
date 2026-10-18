@@ -12,7 +12,7 @@
  */
 import { isJsonObject, type JsonObject, type JsonValue } from '../../core/json.ts';
 import { get, identity, type Step } from './context.ts';
-import { resolve } from './refs.ts';
+import type { SchemaDocument } from './refs.ts';
 
 /** What the old schema allows at one location, as far as A1 is concerned. */
 export interface DeclaredProperties {
@@ -20,10 +20,17 @@ export interface DeclaredProperties {
   readonly keys: ReadonlySet<string>;
   /**
    * True when some applicable subschema accepts properties it does not name
-   * (schema-valued `additionalProperties`, `patternProperties`), or when a
-   * reference could not be followed. Then A1 cannot be applied.
+   * (schema-valued `additionalProperties` or `unevaluatedProperties`,
+   * `patternProperties`), or when a reference could not be followed. Then A1
+   * cannot be applied.
    */
   readonly open: boolean;
+  /**
+   * True when some applicable subschema has a schema-valued
+   * `unevaluatedProperties`: results could then already contain undeclared
+   * fields, typed by that schema, so they are not unknown to clients (A2).
+   */
+  readonly typedUnevaluated: boolean;
 }
 
 interface Expanded {
@@ -35,7 +42,7 @@ const SAME_LOCATION_KEYWORDS = ['allOf', 'anyOf', 'oneOf'] as const;
 const SAME_LOCATION_SINGLE = ['if', 'then', 'else'] as const;
 
 /** Resolves references and adds every combinator member, recursively. */
-function expand(scope: readonly JsonValue[], root: JsonValue): Expanded {
+function expand(scope: readonly JsonValue[], doc: SchemaDocument): Expanded {
   const nodes: JsonObject[] = [];
   // Raw nodes and resolved targets are tracked separately: a node without a
   // $ref resolves to itself and must still be collected.
@@ -47,7 +54,7 @@ function expand(scope: readonly JsonValue[], root: JsonValue): Expanded {
       return;
     }
     visitedRaw.add(raw);
-    const resolved = resolve(raw, root);
+    const resolved = doc.resolve(raw);
     if (!resolved.ok) {
       complete = false;
       return;
@@ -89,10 +96,10 @@ const scopeKeys = new WeakMap<readonly JsonValue[], string>();
  * Identifies a scope by the subschemas it expands to, so two routes to the same
  * location (for example through a recursive reference) get the same key.
  */
-export function scopeKey(scope: readonly JsonValue[], root: JsonValue): string {
+export function scopeKey(scope: readonly JsonValue[], doc: SchemaDocument): string {
   let key = scopeKeys.get(scope);
   if (key === undefined) {
-    const { nodes, complete } = expand(scope, root);
+    const { nodes, complete } = expand(scope, doc);
     key = `${complete ? '' : '?'}${nodes.map(identity).sort().join(',')}`;
     scopeKeys.set(scope, key);
   }
@@ -102,14 +109,18 @@ export function scopeKey(scope: readonly JsonValue[], root: JsonValue): string {
 const declaredMemo = new WeakMap<readonly JsonValue[], DeclaredProperties>();
 
 /** Properties the old schema declares at the scope's location. */
-export function declaredInScope(scope: readonly JsonValue[], root: JsonValue): DeclaredProperties {
+export function declaredInScope(
+  scope: readonly JsonValue[],
+  doc: SchemaDocument,
+): DeclaredProperties {
   const cached = declaredMemo.get(scope);
   if (cached !== undefined) {
     return cached;
   }
-  const { nodes, complete } = expand(scope, root);
+  const { nodes, complete } = expand(scope, doc);
   const keys = new Set<string>();
   let open = !complete;
+  let typedUnevaluated = false;
   for (const node of nodes) {
     const properties = get(node, 'properties');
     if (isJsonObject(properties)) {
@@ -123,14 +134,18 @@ export function declaredInScope(scope: readonly JsonValue[], root: JsonValue): D
         }
       });
     }
+    if (nonEmptyObject(get(node, 'unevaluatedProperties'))) {
+      typedUnevaluated = true;
+    }
     if (
       nonEmptyObject(get(node, 'additionalProperties')) ||
+      nonEmptyObject(get(node, 'unevaluatedProperties')) ||
       nonEmptyObject(get(node, 'patternProperties'))
     ) {
       open = true;
     }
   }
-  const result = { keys, open };
+  const result = { keys, open, typedUnevaluated };
   declaredMemo.set(scope, result);
   return result;
 }
@@ -151,27 +166,34 @@ function matchingPatterns(node: JsonObject, key: string): JsonValue[] {
     .map(([, schema]) => schema);
 }
 
+/**
+ * Subschemas that may apply to an array item. `unevaluatedItems` is included
+ * whenever nothing else is: it may apply, and a scope that is too large only
+ * makes A1 more cautious.
+ */
 function itemSchemas(node: JsonObject, index: number | undefined): JsonValue[] {
   const items = get(node, 'items');
+  const unevaluated = get(node, 'unevaluatedItems');
+  const fallback = (rest: JsonValue | undefined): JsonValue[] => {
+    const chosen = rest ?? unevaluated;
+    return chosen === undefined ? [] : [chosen];
+  };
   if (Array.isArray(items)) {
-    const rest = get(node, 'additionalItems');
     const positional = index === undefined ? undefined : items[index];
-    if (positional !== undefined) {
-      return [positional];
-    }
-    return rest === undefined ? [] : [rest];
+    return positional === undefined ? fallback(get(node, 'additionalItems')) : [positional];
   }
   const prefix = get(node, 'prefixItems');
   const positional = Array.isArray(prefix) && index !== undefined ? prefix[index] : undefined;
-  if (positional !== undefined) {
-    return [positional];
-  }
-  return items === undefined ? [] : [items];
+  return positional === undefined ? fallback(items) : [positional];
 }
 
 /** The scope of the location reached from `scope` by `step`. */
-export function childScope(scope: readonly JsonValue[], root: JsonValue, step: Step): JsonValue[] {
-  const { nodes } = expand(scope, root);
+export function childScope(
+  scope: readonly JsonValue[],
+  doc: SchemaDocument,
+  step: Step,
+): JsonValue[] {
+  const { nodes } = expand(scope, doc);
   const result: JsonValue[] = [];
   for (const node of nodes) {
     switch (step.kind) {
@@ -179,7 +201,7 @@ export function childScope(scope: readonly JsonValue[], root: JsonValue, step: S
         const properties = get(node, 'properties');
         const declared = isJsonObject(properties) ? get(properties, step.key) : undefined;
         const patterns = matchingPatterns(node, step.key);
-        const additional = get(node, 'additionalProperties');
+        const additional = get(node, 'additionalProperties') ?? get(node, 'unevaluatedProperties');
         if (declared !== undefined) {
           result.push(declared);
         }
@@ -193,7 +215,7 @@ export function childScope(scope: readonly JsonValue[], root: JsonValue, step: S
         result.push(...itemSchemas(node, step.index));
         break;
       case 'additional': {
-        const additional = get(node, 'additionalProperties');
+        const additional = get(node, 'additionalProperties') ?? get(node, 'unevaluatedProperties');
         if (additional !== undefined) {
           result.push(additional);
         }
