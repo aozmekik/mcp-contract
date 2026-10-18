@@ -53,11 +53,35 @@ const plainLeaf: fc.Arbitrary<JsonObject> = fc.oneof(
   fc.constant(null).map(() => ({})),
 );
 
-/** Plain leaves plus a reference to the root's single definition `d`. */
+/** Constraints that may sit next to a `$ref` (2020-12 applies both). */
+const refSiblings: fc.Arbitrary<JsonObject> = fc.record(
+  {
+    maximum: fc.integer({ min: -2, max: 3 }),
+    maxLength: fc.nat(3),
+    maxItems: fc.nat(2),
+    minProperties: fc.nat(2),
+    type: fc.constantFrom('object', 'array', 'integer'),
+  },
+  { requiredKeys: [] },
+);
+
+/** Plain leaves plus references to the root's single definition `d`, with or without siblings. */
 const leafSchema: fc.Arbitrary<JsonObject> = fc.oneof(
   { weight: 6, arbitrary: plainLeaf },
   { weight: 1, arbitrary: fc.constant(null).map(() => ({ $ref: '#/$defs/d' })) },
+  { weight: 1, arbitrary: refSiblings.map((siblings) => ({ $ref: '#/$defs/d', ...siblings })) },
 );
+
+/** `false` or a small schema, for `unevaluatedProperties` and `unevaluatedItems`. */
+const unevaluatedArb: fc.Arbitrary<JsonValue | undefined> = fc.oneof(
+  { weight: 3, arbitrary: fc.constant(undefined) },
+  { weight: 2, arbitrary: fc.constant(false) },
+  { weight: 1, arbitrary: fc.constantFrom('string', 'integer').map((type) => ({ type })) },
+);
+
+function withOptional(schema: JsonObject, key: string, value: JsonValue | undefined): JsonObject {
+  return value === undefined ? schema : { ...schema, [key]: value };
+}
 
 const { schema: schemaTree } = fc.letrec<{ schema: JsonObject }>((tie) => ({
   schema: fc.oneof(
@@ -68,24 +92,53 @@ const { schema: schemaTree } = fc.letrec<{ schema: JsonObject }>((tie) => ({
         properties: fc.dictionary(fc.constantFrom(...KEYS), tie('schema'), { maxKeys: 3 }),
         required: fc.subarray([...KEYS]),
         additionalProperties: fc.oneof(fc.constant(undefined), fc.boolean(), tie('schema')),
+        unevaluatedProperties: unevaluatedArb,
       })
-      .map(({ properties, required, additionalProperties }) => ({
-        type: 'object',
-        properties,
-        required,
-        ...(additionalProperties === undefined ? {} : { additionalProperties }),
-      })),
+      .map(({ properties, required, additionalProperties, unevaluatedProperties }) =>
+        withOptional(
+          withOptional(
+            { type: 'object', properties, required },
+            'additionalProperties',
+            additionalProperties,
+          ),
+          'unevaluatedProperties',
+          unevaluatedProperties,
+        ),
+      ),
+    // A composed object closed with unevaluatedProperties, as TypeBox emits.
+    fc
+      .record({
+        members: fc.array(
+          fc.dictionary(fc.constantFrom(...KEYS), tie('schema'), { minKeys: 1, maxKeys: 2 }),
+          { minLength: 1, maxLength: 2 },
+        ),
+        unevaluatedProperties: unevaluatedArb,
+      })
+      .map(({ members, unevaluatedProperties }) =>
+        withOptional(
+          { type: 'object', allOf: members.map((properties) => ({ properties })) },
+          'unevaluatedProperties',
+          unevaluatedProperties,
+        ),
+      ),
     fc
       .record(
         {
           items: tie('schema'),
+          prefixItems: fc.array(tie('schema'), { minLength: 1, maxLength: 2 }),
           minItems: fc.nat(2),
           maxItems: fc.nat(3),
           uniqueItems: fc.boolean(),
         },
-        { requiredKeys: ['items'] },
+        { requiredKeys: [] },
       )
-      .map((array) => ({ type: 'array', ...array })),
+      .chain((array) =>
+        unevaluatedArb.map((unevaluatedItems) =>
+          withOptional({ type: 'array', ...array }, 'unevaluatedItems', unevaluatedItems),
+        ),
+      ),
+    // Recursion through a oneOf next to an always-true alternative.
+    fc.constant(null).map(() => ({ oneOf: [{}, { $ref: '#/$defs/d' }] })),
     fc
       .tuple(
         fc.constantFrom('anyOf', 'oneOf', 'allOf'),
@@ -142,8 +195,9 @@ function nodes(schema: JsonValue, out: JsonObject[] = []): JsonObject[] {
     Object.values(schema.properties).forEach((property) => nodes(property, out));
   }
   nodes(schema.additionalProperties ?? null, out);
+  nodes(schema.unevaluatedProperties ?? null, out);
   nodes(schema.items ?? null, out);
-  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+  for (const keyword of ['anyOf', 'oneOf', 'allOf', 'prefixItems'] as const) {
     const branches = schema[keyword];
     if (Array.isArray(branches)) {
       branches.forEach((branch) => nodes(branch, out));
@@ -161,7 +215,7 @@ function clear(node: JsonObject): void {
 }
 
 function mutateNode(node: JsonObject, m: Mutation): void {
-  switch (m.op % 12) {
+  switch (m.op % 15) {
     case 0:
       node.minimum = m.number;
       break;
@@ -225,6 +279,32 @@ function mutateNode(node: JsonObject, m: Mutation): void {
     case 9:
       if (Array.isArray(node.anyOf) && node.anyOf.length > 1) {
         node.anyOf = node.anyOf.slice(1);
+      } else if (Array.isArray(node.allOf) && node.allOf.length > 1) {
+        node.allOf = node.allOf.slice(1);
+      }
+      break;
+    case 11:
+      if (node.unevaluatedProperties === false) {
+        delete node.unevaluatedProperties;
+      } else {
+        node.unevaluatedProperties = false;
+      }
+      break;
+    case 12:
+      if (Array.isArray(node.prefixItems) && node.prefixItems.length > 1) {
+        node.prefixItems = node.prefixItems.slice(0, -1);
+      } else {
+        node.prefixItems = [
+          ...(Array.isArray(node.prefixItems) ? node.prefixItems : []),
+          clone(m.replacement),
+        ];
+      }
+      break;
+    case 13:
+      if (node.unevaluatedItems === false) {
+        delete node.unevaluatedItems;
+      } else {
+        node.unevaluatedItems = false;
       }
       break;
     case 10:

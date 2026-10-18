@@ -4,7 +4,11 @@
  */
 import { isJsonObject, type JsonObject, type JsonValue } from '../../src/core/json.ts';
 
-/** Follows `{$ref: '#/$defs/d'}`, the only reference shape the generators produce. */
+/**
+ * Follows `{$ref: '#/$defs/d'}`, the only reference the generators produce.
+ * Constraints next to it are dropped: the generators only put scalar
+ * constraints there, which declare no properties and contain no subschemas.
+ */
 function deref(node: JsonValue, root: JsonValue): JsonValue {
   let current = node;
   for (
@@ -39,11 +43,13 @@ function declaredKeys(schema: JsonValue, root: JsonValue): { keys: Set<string>; 
         }
       });
     }
-    const additional = node.additionalProperties;
-    if (isJsonObject(additional) && Object.keys(additional).length > 0) {
-      // A schema-valued additionalProperties is compared exactly; `{}` means
-      // "anything", like an absent keyword, so A1 still applies to it.
-      open = true;
+    for (const additional of [node.additionalProperties, node.unevaluatedProperties]) {
+      if (isJsonObject(additional) && Object.keys(additional).length > 0) {
+        // A schema-valued additionalProperties (or unevaluatedProperties)
+        // accepts undeclared keys; `{}` means "anything", like an absent
+        // keyword, so A1 still applies to it.
+        open = true;
+      }
     }
     for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
       const branches = node[keyword];
@@ -67,11 +73,18 @@ function subschemasFor(schema: JsonValue, key: string | number, root: JsonValue)
     seen.add(node);
     if (typeof key === 'string' && isJsonObject(node.properties) && key in node.properties) {
       found.push(node.properties[key] as JsonValue);
-    } else if (typeof key === 'string' && isJsonObject(node.additionalProperties)) {
-      found.push(node.additionalProperties);
+    } else if (typeof key === 'string') {
+      const rest = node.additionalProperties ?? node.unevaluatedProperties;
+      if (isJsonObject(rest)) {
+        found.push(rest);
+      }
     }
-    if (typeof key === 'number' && node.items !== undefined) {
-      found.push(node.items);
+    if (typeof key === 'number') {
+      const positional = Array.isArray(node.prefixItems) ? node.prefixItems[key] : undefined;
+      const rest = positional ?? node.items ?? node.unevaluatedItems;
+      if (rest !== undefined) {
+        found.push(rest);
+      }
     }
     for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
       const branches = node[keyword];
@@ -107,10 +120,13 @@ export function declaredOnly(
 }
 
 /**
- * A2: drops `additionalProperties: false`, i.e. unknown result fields are
- * ignored. Not applied inside `oneOf`: relaxing one alternative can make two
- * alternatives match and so reject a value, which is not what A2 means (and
- * the engine never relies on A2 inside oneOf; it reports `unknown` there).
+ * A2: drops `additionalProperties: false` and `unevaluatedProperties: false`,
+ * i.e. unknown result fields are ignored. Not applied inside `oneOf`: relaxing
+ * one alternative can make two alternatives match and so reject a value,
+ * which is not what A2 means (and the engine never relies on A2 inside oneOf;
+ * it reports `unknown` there). Definitions are relaxed, so a oneOf that refers
+ * to one can still change; the oracle therefore accepts a result that the
+ * unrelaxed old schema accepts, too.
  */
 export function relaxAdditionalProperties(schema: JsonValue): JsonValue {
   if (Array.isArray(schema)) {
@@ -121,7 +137,7 @@ export function relaxAdditionalProperties(schema: JsonValue): JsonValue {
   }
   const result: JsonObject = {};
   for (const [key, value] of Object.entries(schema)) {
-    if (key === 'additionalProperties' && value === false) {
+    if ((key === 'additionalProperties' || key === 'unevaluatedProperties') && value === false) {
       continue;
     }
     result[key] =

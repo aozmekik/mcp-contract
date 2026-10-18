@@ -8,8 +8,9 @@
  * - input:  every instance valid under the old schema (and using only declared
  *           properties, assumption A1) must be valid under the new schema;
  * - output: every instance valid under the new schema must be valid under the
- *           old schema once `additionalProperties: false` is relaxed (A2:
- *           clients ignore fields they do not know).
+ *           old schema, or once `additionalProperties: false` (and
+ *           `unevaluatedProperties: false`) is relaxed (A2: clients ignore
+ *           fields they do not know).
  *
  * The generators deliberately use a tiny value domain (keys a/b/c, integers
  * -2..3, short strings) so that random instances actually hit the boundaries
@@ -55,6 +56,17 @@ function claimsCompatible(
 const settings = { numRuns: RUNS, seed: SEED, endOnFailure: true };
 
 describe('schema compatibility engine (property-based, Ajv oracle)', () => {
+  it('never throws on a pair of schemas', () => {
+    fc.assert(
+      fc.property(pairArb, ([before, after]) => {
+        for (const direction of ['input', 'output'] as const) {
+          diffSchemas(before, after, { direction });
+        }
+      }),
+      settings,
+    );
+  });
+
   it('never throws and reports nothing when comparing a schema with itself', () => {
     fc.assert(
       fc.property(rootArb, (generated) => {
@@ -96,7 +108,7 @@ describe('schema compatibility engine (property-based, Ajv oracle)', () => {
         for (const instance of instances) {
           if (validate(after, instance)) {
             expect(
-              validate(relaxed, instance),
+              validate(before, instance) || validate(relaxed, instance),
               `${JSON.stringify(instance)} is valid under ${JSON.stringify(after)} but not under ${JSON.stringify(before)}`,
             ).toBe(true);
           }
