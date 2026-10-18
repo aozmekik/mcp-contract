@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { InvalidFileError } from '../core/errors.ts';
+import { InvalidFileError, OutputFileError, describeError, errorCode } from '../core/errors.ts';
 import { parseSnapshot, serializeSnapshot } from './format.ts';
 import type { Snapshot } from './model.ts';
 
@@ -18,13 +18,11 @@ export async function readSnapshot(path: string): Promise<Snapshot> {
   try {
     text = await readFile(path, 'utf8');
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
+    const code = errorCode(error);
     throw new InvalidFileError(
       path,
-      code === 'ENOENT' ? 'file not found' : `cannot read file (${String(code)})`,
-      {
-        cause: error,
-      },
+      code === 'ENOENT' ? 'file not found' : `cannot read file (${code ?? describeError(error)})`,
+      { cause: error },
     );
   }
   return parseSnapshot(text, path);
@@ -35,6 +33,7 @@ export async function readSnapshot(path: string): Promise<Snapshot> {
  * rename), so an interrupted run never leaves a truncated snapshot behind.
  *
  * @returns The serialised text that was written.
+ * @throws {OutputFileError} if the file cannot be written.
  */
 export async function writeSnapshot(path: string, snapshot: Snapshot): Promise<string> {
   const text = serializeSnapshot(snapshot);
@@ -44,7 +43,14 @@ export async function writeSnapshot(path: string, snapshot: Snapshot): Promise<s
     await rename(temporary, path);
   } catch (error) {
     await rm(temporary, { force: true });
-    throw error;
+    const code = errorCode(error);
+    throw new OutputFileError(
+      path,
+      code === 'ENOENT'
+        ? 'cannot write file (its directory does not exist)'
+        : `cannot write file (${code ?? describeError(error)})`,
+      { cause: error },
+    );
   }
   return text;
 }

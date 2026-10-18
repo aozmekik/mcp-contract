@@ -54,3 +54,24 @@ export function shouldColor(options: {
   }
   return options.isTTY;
 }
+
+/**
+ * Characters that must not reach a terminal or a CI log unescaped: C0 and C1
+ * control characters (ANSI escape sequences start with one) and the Unicode
+ * bidirectional overrides that can make text display differently from what
+ * it is.
+ */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point.
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu;
+
+/**
+ * Escapes characters in server-provided text (tool names, property names,
+ * messages) that could change how a report is displayed or interpreted: a
+ * newline, for example, could start a fake line in a CI log.
+ */
+export function printable(text: string): string {
+  return text.replaceAll(UNPRINTABLE, (character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return `\\u${code.toString(16).padStart(4, '0')}`;
+  });
+}

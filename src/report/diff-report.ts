@@ -8,7 +8,7 @@ import {
   type Severity,
 } from '../diff/model.ts';
 import { formatAnnotation, markdownCell, markdownCode, type AnnotationLevel } from './github.ts';
-import { createStyle, type Style } from './style.ts';
+import { createStyle, printable, type Style } from './style.ts';
 
 /** Options shared by the diff formatters. */
 export interface DiffReportOptions {
@@ -45,11 +45,14 @@ function paint(style: Style, severity: Severity, text: string): string {
   }
 }
 
-/** `inputSchema $.limit`, `annotations`, ... or an empty string for entity-level changes. */
+/**
+ * `inputSchema $.limit`, `annotations`, ... or an empty string for
+ * entity-level changes. Server-provided names are made printable.
+ */
 export function changeLocation(change: Change): string {
-  return [change.location, change.path]
-    .filter((part) => part !== undefined && part !== '')
-    .join(' ');
+  return printable(
+    [change.location, change.path].filter((part) => part !== undefined && part !== '').join(' '),
+  );
 }
 
 function summaryLine(result: DiffResult): string {
@@ -81,14 +84,16 @@ export function formatDiffText(result: DiffResult, options: DiffReportOptions = 
   const lines: string[] = [style.bold(summaryLine(result))];
   let group = '';
   for (const change of result.changes) {
-    const heading = `${ENTITY_LABELS[change.entity]} ${change.name}`;
+    const heading = `${ENTITY_LABELS[change.entity]} ${printable(change.name)}`;
     if (heading !== group) {
       group = heading;
       lines.push('', style.bold(heading));
     }
     const label = paint(style, change.severity, LABELS[change.severity].padEnd(12));
     const location = changeLocation(change);
-    lines.push(`  ${label}  ${location === '' ? '' : `${style.dim(location)}: `}${change.message}`);
+    lines.push(
+      `  ${label}  ${location === '' ? '' : `${style.dim(location)}: `}${printable(change.message)}`,
+    );
   }
   const { passed, text } = verdict(result, failOn);
   lines.push('', passed ? style.green(text) : style.red(style.bold(text)));
@@ -116,7 +121,7 @@ export function formatDiffMarkdown(result: DiffResult, options: DiffReportOption
     for (const change of result.changes) {
       const location = changeLocation(change);
       lines.push(
-        `| ${LABELS[change.severity]} | ${ENTITY_LABELS[change.entity]} ${markdownCell(markdownCode(change.name))} | ${location === '' ? '' : markdownCell(markdownCode(location))} | ${markdownCell(change.message)} |`,
+        `| ${LABELS[change.severity]} | ${ENTITY_LABELS[change.entity]} ${markdownCell(markdownCode(printable(change.name)))} | ${location === '' ? '' : markdownCell(markdownCode(location))} | ${markdownCell(printable(change.message))} |`,
       );
     }
     lines.push('');
@@ -138,8 +143,8 @@ export function formatDiffAnnotations(result: DiffResult, options: DiffReportOpt
       const location = changeLocation(change);
       return `${formatAnnotation({
         level: LEVELS[change.severity],
-        title: `${LABELS[change.severity]} ${ENTITY_LABELS[change.entity]} ${change.name}`,
-        message: `${location === '' ? '' : `${location}: `}${change.message}`,
+        title: `${LABELS[change.severity]} ${ENTITY_LABELS[change.entity]} ${printable(change.name)}`,
+        message: `${location === '' ? '' : `${location}: `}${printable(change.message)}`,
         file: options.file,
       })}\n`;
     })

@@ -10,10 +10,14 @@ export const ExitCode = {
   Ok: 0,
   /** The contract check failed: disallowed changes or failing scenarios. */
   ContractFailure: 1,
-  /** Bad command-line usage or an invalid input file. */
+  /** Bad command-line usage, an invalid input file, or an output file that cannot be written. */
   UsageError: 2,
   /** The server could not be started, reached, or spoke the protocol incorrectly. */
   ServerError: 3,
+  /** A bug in mcp-contract: an error it did not anticipate. */
+  InternalError: 4,
+  /** The run was interrupted (SIGINT or SIGTERM); 128 + SIGINT, as shells report it. */
+  Interrupted: 130,
 } as const;
 
 /** One of the values of {@link ExitCode}. */
@@ -52,6 +56,26 @@ export class InvalidFileError extends McpContractError {
   }
 }
 
+/** A snapshot or report file that cannot be written (exit code 2). */
+export class OutputFileError extends McpContractError {
+  /** Path of the file that could not be written. */
+  readonly file: string;
+
+  /** Creates an error describing why `file` could not be written. */
+  constructor(file: string, reason: string, options?: ErrorOptions) {
+    super(`${file}: ${reason}`, ExitCode.UsageError, options);
+    this.file = file;
+  }
+}
+
+/** The run was interrupted through its abort signal (exit code 130). */
+export class InterruptedError extends McpContractError {
+  /** Creates the error; `cause` is usually the signal's reason. */
+  constructor(options?: ErrorOptions) {
+    super('interrupted', ExitCode.Interrupted, options);
+  }
+}
+
 /** The server failed to start, connect, answer in time or follow the protocol (exit code 3). */
 export class ServerError extends McpContractError {
   /** Tail of the server's stderr, when it was captured. */
@@ -62,6 +86,12 @@ export class ServerError extends McpContractError {
     super(message, ExitCode.ServerError, options);
     this.serverStderr = options?.serverStderr;
   }
+}
+
+/** The `code` of a Node.js system error (`ENOENT`, `EACCES`, ...), if any. */
+export function errorCode(error: unknown): string | undefined {
+  const code: unknown = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+  return typeof code === 'string' ? code : undefined;
 }
 
 /** Returns a readable message for any thrown value. */

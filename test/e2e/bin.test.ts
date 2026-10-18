@@ -4,6 +4,8 @@
  */
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { VERSION } from '../../src/version.ts';
@@ -87,5 +89,49 @@ describe('mcp-contract bin', () => {
     expect(result.code).toBe(130);
     expect(result.stdout).toBe('');
     expect(await waitForExit(await log.pids())).toEqual([]);
+  });
+
+  it('stops a scenario run on SIGINT with exit code 130 and reports no failures', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mcp-contract-bin-'));
+    try {
+      const calls = join(directory, 'calls.txt');
+      const scenarios = join(directory, 'slow.yaml');
+      await writeFile(
+        scenarios,
+        ['one', 'two', 'three']
+          .map((name) => `  - { name: ${name}, tool: sleep, arguments: { ms: 30000 } }`)
+          .join('\n')
+          .replace(/^/, 'scenarios:\n'),
+      );
+      const { child, exit } = start(
+        [
+          'test',
+          scenarios,
+          '--stdio',
+          nodeCommand(FIXTURE_SERVER),
+          '--protocol',
+          'legacy',
+          '--env',
+          'MCP_CONTRACT_PID_FILE',
+          '--env',
+          'MCP_CONTRACT_CALL_FILE',
+        ],
+        { MCP_CONTRACT_PID_FILE: log.path, MCP_CONTRACT_CALL_FILE: calls },
+      );
+      // Interrupt while the first tool call is running, however long it takes to start.
+      const called = async (): Promise<boolean> =>
+        (await readFile(calls, 'utf8').catch(() => '')).includes('sleep');
+      while (!(await called())) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      child.kill('SIGINT');
+      const result = await exit;
+      expect(result.code).toBe(130);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('mcp-contract: interrupted\n');
+      expect(await waitForExit(await log.pids())).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

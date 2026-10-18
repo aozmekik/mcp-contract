@@ -63,7 +63,7 @@ async function expectAllExited(minimum: number): Promise<void> {
 describe('child process cleanup', () => {
   it('terminates the server and the protocol probe after a successful snapshot', async () => {
     const snapshot = await snapshotServer(fixture('ok'));
-    expect(snapshot.tools.map((tool) => tool.name)).toEqual(['echo']);
+    expect(snapshot.tools.map((tool) => tool.name)).toEqual(['echo', 'sleep']);
     expect(snapshot.protocol).toEqual({
       era: 'modern',
       version: '2026-07-28',

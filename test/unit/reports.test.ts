@@ -7,8 +7,14 @@ import {
   formatDiffMarkdown,
   formatDiffText,
 } from '../../src/report/diff-report.ts';
-import { formatAnnotation, markdownCell, markdownCode } from '../../src/report/github.ts';
-import { createStyle, shouldColor } from '../../src/report/style.ts';
+import {
+  formatAnnotation,
+  inertCommands,
+  markdownCell,
+  markdownCode,
+  withoutWorkflowCommands,
+} from '../../src/report/github.ts';
+import { createStyle, printable, shouldColor } from '../../src/report/style.ts';
 import {
   formatTestAnnotations,
   formatTestJson,
@@ -124,8 +130,67 @@ describe('github output', () => {
     expect(markdown).toContain('**FAIL: 2 changes at or above the fail-on threshold (unknown)**');
     expect(formatDiffMarkdown(empty)).not.toContain('| Severity');
     expect(markdownCell('a|b\nc')).toBe('a\\|b<br>c');
+    expect(markdownCell('<= 5 <img>')).toBe('&lt;= 5 &lt;img&gt;');
     expect(markdownCode('a`b')).toBe('``a`b``');
     expect(markdownCode('`x')).toBe('`` `x ``');
+  });
+});
+
+describe('server-provided text', () => {
+  const hostile = snapshotOf({
+    tools: [
+      tool('evil\n::notice title=Injected::all good\u001b[2J', {
+        inputSchema: { type: 'object', properties: {} },
+      }),
+    ],
+  });
+  const injected = diffSnapshots(hostile, snapshotOf());
+
+  it('is escaped so that it cannot start a line or carry terminal escapes', () => {
+    expect(printable('a\nb\u001b[31m\u202e\u0085')).toBe('a\\u000ab\\u001b[31m\\u202e\\u0085');
+    expect(printable('plain text, ünïcode and emoji-free')).toBe(
+      'plain text, ünïcode and emoji-free',
+    );
+    for (const text of [
+      formatDiffText(injected, { color: true }),
+      formatDiffMarkdown(injected),
+      formatDiffAnnotations(injected),
+    ]) {
+      expect(text).not.toContain('\u001b[2J');
+      expect(text.split('\n').some((line) => line.trimStart().startsWith('::notice'))).toBe(false);
+    }
+    expect(formatDiffText(injected)).toContain('tool evil\\u000a::notice title=Injected');
+  });
+
+  it('can be fenced off from workflow command processing', () => {
+    const fenced = withoutWorkflowCommands('::warning::x\n', 'abc123');
+    expect(fenced).toBe('::stop-commands::abc123\n::warning::x\n::abc123::\n');
+    const random = withoutWorkflowCommands('text');
+    expect(random).toMatch(/^::stop-commands::([0-9a-f]{32})\ntext\n::\1::\n$/);
+    expect(inertCommands('ok\n  ::error::spoofed\n::set-env name=x::y')).toBe(
+      'ok\n  : :error::spoofed\n: :set-env name=x::y',
+    );
+  });
+
+  it('is escaped in scenario reports too', () => {
+    const failed: ScenarioResult[] = [
+      {
+        name: 'n\n::error::x',
+        tool: 't\u001b',
+        passed: false,
+        failures: ['a\n::warning::b', 'second'],
+        durationMs: 1,
+      },
+    ];
+    for (const text of [
+      formatTestText(failed),
+      formatTestMarkdown(failed),
+      formatTestAnnotations(failed),
+    ]) {
+      expect(text).not.toContain('\u001b');
+      expect(text.split('\n').some((line) => /^\s*::(error|warning)::/.test(line))).toBe(false);
+    }
+    expect(formatTestAnnotations(failed)).toContain('a\\u000a::warning::b%0Asecond');
   });
 });
 

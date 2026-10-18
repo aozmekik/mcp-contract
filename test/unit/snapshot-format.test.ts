@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { InvalidFileError } from '../../src/core/errors.ts';
+import { InvalidFileError, OutputFileError } from '../../src/core/errors.ts';
 import type { JsonObject } from '../../src/core/json.ts';
 import { diffSnapshots } from '../../src/diff/snapshot-diff.ts';
 import { readSnapshot, writeSnapshot } from '../../src/snapshot/files.ts';
@@ -221,10 +221,13 @@ describe('snapshot files', () => {
     expect(await readSnapshot(path)).toEqual(snapshotOf());
   });
 
-  it('cleans up the temporary file when the target cannot be written', async () => {
+  it('reports a target that cannot be written as an output file error', async () => {
     const target = join(directory, 'missing-dir', 'contract.json');
-    await expect(writeSnapshot(target, snapshotOf())).rejects.toThrow();
+    const failure = writeSnapshot(target, snapshotOf());
+    await expect(failure).rejects.toThrow(OutputFileError);
+    await expect(failure).rejects.toThrow(/its directory does not exist/);
     expect(await readdir(directory)).toEqual([]);
+    await expect(writeSnapshot(directory, snapshotOf())).rejects.toThrow(/cannot write file \(E/);
   });
 
   it('distinguishes a missing file from an unreadable one', async () => {

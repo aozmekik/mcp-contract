@@ -92,6 +92,18 @@ export interface ConnectOptions {
   readonly protocol?: ProtocolMode;
   /** Timeout for connecting and for each request, in milliseconds. Defaults to 30 000. */
   readonly timeoutMs?: number;
+  /**
+   * Timeout for the `server/discover` probe of `auto` and pinned negotiation,
+   * in milliseconds. On stdio a probe that times out means "2025-era server".
+   * Defaults to {@link timeoutMs}, so that a slow-starting modern server is
+   * not mistaken for a 2025-era one.
+   */
+  readonly probeTimeoutMs?: number;
+  /**
+   * Receives human-readable hints about the connection, for example that the
+   * protocol probe used up its whole timeout. The CLI prints them to stderr.
+   */
+  readonly onDiagnostic?: (message: string) => void;
   /** Aborts the connection attempt and any request made through the connection. */
   readonly signal?: AbortSignal;
 }
@@ -102,7 +114,7 @@ export interface ServerConnection extends AsyncDisposable {
   readonly client: Client;
   /** The negotiated protocol revision. */
   readonly protocol: ProtocolInfo;
-  /** A human-readable description of the target, safe to print. */
+  /** A human-readable description of the target for messages; see {@link describeTarget}. */
   readonly description: string;
   /** Per-request timeout in milliseconds. */
   readonly timeoutMs: number;
@@ -119,11 +131,43 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 
 const STDERR_TAIL_BYTES = 16 * 1024;
 
-/** Returns a printable description of a target that does not leak query strings or credentials. */
+/** Argument names that suggest the next value (or the value after `=`) is a credential. */
+const SECRET_NAME = /key|token|secret|passw|credential|auth/i;
+
+const REDACTED = '***';
+
+/** Hides values that follow secret-looking flags (`--api-key x`, `--token=x`, `API_KEY=x`). */
+function redactArguments(args: readonly string[]): string[] {
+  const result: string[] = [];
+  let hideNext = false;
+  for (const arg of args) {
+    if (hideNext) {
+      result.push(REDACTED);
+      hideNext = false;
+      continue;
+    }
+    const assignment = /^(-{1,2}[^=]+|[A-Za-z_][A-Za-z0-9_]*)=/.exec(arg);
+    if (assignment?.[1] !== undefined && SECRET_NAME.test(assignment[1])) {
+      result.push(`${assignment[1]}=${REDACTED}`);
+      continue;
+    }
+    hideNext = arg.startsWith('-') && !arg.includes('=') && SECRET_NAME.test(arg);
+    result.push(arg);
+  }
+  return result;
+}
+
+/**
+ * Returns a description of a target for messages. URL query strings and
+ * header values are never included, and for stdio targets the values of
+ * secret-looking arguments (`--api-key <value>`, `--token=<value>`,
+ * `API_KEY=<value>`) are replaced by `***`. Other arguments are shown as given,
+ * so prefer passing secrets through `env`.
+ */
 export function describeTarget(target: ServerTarget): string {
   switch (target.type) {
     case 'stdio':
-      return `stdio: ${[target.command, ...(target.args ?? [])].map(quoteWord).join(' ')}`;
+      return `stdio: ${[target.command, ...redactArguments(target.args ?? [])].map(quoteWord).join(' ')}`;
     case 'http': {
       if (!URL.canParse(String(target.url))) {
         return 'http: (invalid URL)';
@@ -228,8 +272,11 @@ export async function connectServer(
   options: ConnectOptions = {},
 ): Promise<ServerConnection> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new UsageError(`Timeout must be a positive number of milliseconds, got ${timeoutMs}`);
+  const probeTimeoutMs = options.probeTimeoutMs ?? timeoutMs;
+  for (const value of [timeoutMs, probeTimeoutMs]) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new UsageError(`Timeout must be a positive number of milliseconds, got ${value}`);
+    }
   }
   const { signal } = options;
   if (signal?.aborted === true) {
@@ -245,7 +292,7 @@ export async function connectServer(
   const mode = negotiationMode(options.protocol);
   const client = new Client(
     { name: 'mcp-contract', version: VERSION },
-    { versionNegotiation: { mode } },
+    { versionNegotiation: { mode, probe: { timeoutMs: probeTimeoutMs } } },
   );
 
   // The SDK does not watch the signal while it probes a stdio server on a
@@ -255,6 +302,7 @@ export async function connectServer(
     transport.close().catch(() => undefined);
   };
   signal?.addEventListener('abort', onAbort, { once: true });
+  const started = performance.now();
   try {
     await client.connect(transport, {
       timeout: timeoutMs,
@@ -280,6 +328,16 @@ export async function connectServer(
   }
 
   const kind: NegotiationKind = typeof mode === 'string' ? mode : 'pin';
+  if (
+    kind === 'auto' &&
+    era === 'legacy' &&
+    target.type === 'stdio' &&
+    performance.now() - started >= probeTimeoutMs
+  ) {
+    options.onDiagnostic?.(
+      `${description} was treated as a 2025-era server after the server/discover probe ran for its whole timeout (${probeTimeoutMs} ms). If the server does not answer requests before initialize, pass --protocol legacy to skip the probe, or --probe-timeout to shorten it.`,
+    );
+  }
   const supportedVersions = client.getDiscoverResult()?.supportedVersions;
 
   let closing: Promise<void> | undefined;

@@ -25,8 +25,10 @@ export {
 export { splitCommandLine } from './connect/command-line.ts';
 export {
   ExitCode,
+  InterruptedError,
   InvalidFileError,
   McpContractError,
+  OutputFileError,
   ServerError,
   UsageError,
 } from './core/errors.ts';

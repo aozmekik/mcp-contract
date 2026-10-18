@@ -2,6 +2,7 @@
  * GitHub Actions workflow commands, escaped the way the runner expects
  * (https://docs.github.com/actions/reference/workflow-commands-for-github-actions).
  */
+import { randomBytes } from 'node:crypto';
 
 /** Annotation level of a workflow command. */
 export type AnnotationLevel = 'error' | 'warning' | 'notice';
@@ -35,9 +36,35 @@ export function formatAnnotation(annotation: Annotation): string {
   return `::${annotation.level} ${properties.join(',')}::${escapeData(annotation.message)}`;
 }
 
-/** Escapes text for a Markdown table cell. */
+/**
+ * Wraps text that must not be interpreted as workflow commands (it contains
+ * names chosen by the server) between `::stop-commands::` and the resume
+ * command, using a random token that the text cannot know.
+ */
+export function withoutWorkflowCommands(
+  text: string,
+  token: string = randomBytes(16).toString('hex'),
+): string {
+  return `::stop-commands::${token}\n${text}${text.endsWith('\n') ? '' : '\n'}::${token}::\n`;
+}
+
+/**
+ * Defuses lines that the Actions runner would execute as workflow commands
+ * (it trims leading whitespace, then looks for `::`), keeping them readable.
+ * For logs that are not wrapped by {@link withoutWorkflowCommands}.
+ */
+export function inertCommands(text: string): string {
+  return text.replaceAll(/^(\s*)::/gm, '$1: :');
+}
+
+/** Escapes text for a Markdown table cell (pipes, line breaks and HTML). */
 export function markdownCell(text: string): string {
-  return text.replaceAll('\\', '\\\\').replaceAll('|', '\\|').replaceAll(/\r?\n/g, '<br>');
+  return text
+    .replaceAll('\\', '\\\\')
+    .replaceAll('|', '\\|')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll(/\r?\n/g, '<br>');
 }
 
 /** Formats text as inline Markdown code, choosing a fence that the text cannot close. */

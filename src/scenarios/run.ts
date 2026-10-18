@@ -1,6 +1,6 @@
 import { ProtocolError, SdkError } from '@modelcontextprotocol/client';
 import { canonicalize, isJsonObject, type JsonObject, type JsonValue } from '../core/json.ts';
-import { describeError } from '../core/errors.ts';
+import { InterruptedError, describeError } from '../core/errors.ts';
 import type { ServerConnection } from '../connect/connect.ts';
 import type { Scenario } from './file.ts';
 import { isOperatorObject, matchValue } from './match.ts';
@@ -120,6 +120,9 @@ function evaluate(scenario: Scenario, outcome: Outcome): string[] {
  *
  * Before the first call the tool list is fetched once, so the SDK validates
  * `structuredContent` against each tool's `outputSchema`.
+ *
+ * @throws {InterruptedError} when the connection's signal aborts; the
+ *   remaining scenarios are not run, and none is reported as failed.
  */
 export async function runScenarios(
   connection: ServerConnection,
@@ -136,8 +139,15 @@ export async function runScenarios(
   } catch {
     // Without a tool list the SDK simply skips output validation; the calls themselves still run.
   }
+  const { signal } = connection;
+  const stopIfAborted = (cause?: unknown): void => {
+    if (signal?.aborted === true) {
+      throw new InterruptedError({ cause: cause ?? signal.reason });
+    }
+  };
   const results: ScenarioResult[] = [];
   for (const scenario of scenarios) {
+    stopIfAborted();
     const started = now();
     let outcome: Outcome;
     try {
@@ -148,6 +158,7 @@ export async function runScenarios(
       const json: JsonValue = canonicalize(result);
       outcome = { kind: 'result', result: isJsonObject(json) ? json : {} };
     } catch (error) {
+      stopIfAborted(error); // an aborted call is not a failed scenario
       outcome = { kind: 'error', error: errorOutcome(error) };
     }
     const failures = evaluate(scenario, outcome);

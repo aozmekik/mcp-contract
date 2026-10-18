@@ -1,6 +1,6 @@
 import type { ScenarioResult } from '../scenarios/run.ts';
 import { formatAnnotation, markdownCell } from './github.ts';
-import { createStyle } from './style.ts';
+import { createStyle, printable } from './style.ts';
 
 /** Options shared by the scenario report formatters. */
 export interface TestReportOptions {
@@ -31,10 +31,10 @@ export function formatTestText(
   for (const result of results) {
     const label = result.passed ? style.green('PASS') : style.red(style.bold('FAIL'));
     lines.push(
-      `${label}  ${result.name} ${style.dim(`[${result.tool}]${duration(result, options)}`)}`,
+      `${label}  ${printable(result.name)} ${style.dim(`[${printable(result.tool)}]${duration(result, options)}`)}`,
     );
     for (const failure of result.failures) {
-      lines.push(`      ${failure}`);
+      lines.push(`      ${printable(failure)}`);
     }
   }
   const { passed, failed } = counts(results);
@@ -63,9 +63,11 @@ export function formatTestMarkdown(
   ];
   for (const result of results) {
     const details =
-      result.failures.length === 0 ? duration(result, options).trim() : result.failures.join('\n');
+      result.failures.length === 0
+        ? duration(result, options).trim()
+        : result.failures.map(printable).join('\n');
     lines.push(
-      `| ${result.passed ? 'PASS' : 'FAIL'} | ${markdownCell(result.name)} | ${markdownCell(result.tool)} | ${markdownCell(details)} |`,
+      `| ${result.passed ? 'PASS' : 'FAIL'} | ${markdownCell(printable(result.name))} | ${markdownCell(printable(result.tool))} | ${markdownCell(details)} |`,
     );
   }
   return `${lines.join('\n')}\n`;
@@ -80,7 +82,7 @@ export function formatTestAnnotations(
     .filter((result) => !result.passed)
     .map(
       (result) =>
-        `${formatAnnotation({ level: 'error', title: `Scenario failed: ${result.name}`, message: result.failures.join('\n'), file: options.file })}\n`,
+        `${formatAnnotation({ level: 'error', title: `Scenario failed: ${printable(result.name)}`, message: result.failures.map(printable).join('\n'), file: options.file })}\n`,
     )
     .join('');
 }

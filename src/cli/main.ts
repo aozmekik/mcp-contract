@@ -1,11 +1,12 @@
 import { appendFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { splitCommandLine } from '../connect/command-line.ts';
 import {
   DEFAULT_TIMEOUT_MS,
   connectServer,
   type ConnectOptions,
+  type ProtocolInfo,
   type ProtocolMode,
   type ServerTarget,
   type StdioTarget,
@@ -13,9 +14,11 @@ import {
 import {
   ExitCode,
   McpContractError,
+  OutputFileError,
   ServerError,
   UsageError,
   describeError,
+  errorCode,
 } from '../core/errors.ts';
 import { DEFAULT_FAIL_ON, failingChanges, type DiffResult, type FailOn } from '../diff/model.ts';
 import { diffSnapshots } from '../diff/snapshot-diff.ts';
@@ -25,6 +28,7 @@ import {
   formatDiffMarkdown,
   formatDiffText,
 } from '../report/diff-report.ts';
+import { inertCommands, withoutWorkflowCommands } from '../report/github.ts';
 import { shouldColor } from '../report/style.ts';
 import {
   formatTestAnnotations,
@@ -57,7 +61,10 @@ export interface CliIo {
 }
 
 /** Exit code used when the run was interrupted by a signal (128 + SIGINT). */
-export const INTERRUPTED_EXIT_CODE = 130;
+export const INTERRUPTED_EXIT_CODE: number = ExitCode.Interrupted;
+
+/** The first revision of the modern (`server/discover`) era; only those can be pinned. */
+const FIRST_MODERN_REVISION = '2026-07-28';
 
 const HELP = `mcp-contract ${VERSION}: contract testing for Model Context Protocol servers
 
@@ -81,8 +88,10 @@ Server options (snapshot, check, test):
   --cwd <dir>               Working directory for --stdio
   --env <name[=value]>      Environment variable for --stdio; without a value it is
                             copied from the current environment (repeatable)
-  --protocol <mode>         auto (default), legacy, or a revision to require, e.g. 2026-07-28
+  --protocol <mode>         auto (default; check uses the baseline's mode), legacy, or a
+                            revision to require (2026-07-28 or later)
   --timeout <ms>            Timeout per request (default ${DEFAULT_TIMEOUT_MS})
+  --probe-timeout <ms>      Timeout of the server/discover probe (default: --timeout)
   --server-stderr <mode>    pipe (default: shown on failure), inherit, or ignore
 
 Output options (diff, check, test):
@@ -97,7 +106,8 @@ Other options:
   -v, --version             Show the version
 
 Exit codes:
-  0  passed    1  contract failure    2  usage or input error    3  server error
+  0  passed             1  contract failure      2  usage, input or output file error
+  3  server error       4  internal error        130  interrupted
 `;
 
 const SERVER_OPTIONS = {
@@ -108,6 +118,7 @@ const SERVER_OPTIONS = {
   env: { type: 'string', multiple: true },
   protocol: { type: 'string' },
   timeout: { type: 'string' },
+  'probe-timeout': { type: 'string' },
   'server-stderr': { type: 'string' },
 } as const;
 
@@ -129,6 +140,7 @@ interface ServerFlags {
   readonly env?: string[] | undefined;
   readonly protocol?: string | undefined;
   readonly timeout?: string | undefined;
+  readonly 'probe-timeout'?: string | undefined;
   readonly 'server-stderr'?: string | undefined;
 }
 
@@ -199,26 +211,42 @@ function parseEnv(entries: readonly string[], env: CliIo['env']): Record<string,
   return result;
 }
 
-function parseProtocol(value: string | undefined): ProtocolMode {
-  if (value === undefined || value === 'auto' || value === 'legacy') {
-    return value ?? 'auto';
+function parseProtocol(value: string): ProtocolMode {
+  if (value === 'auto' || value === 'legacy') {
+    return value;
   }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return { pin: value };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new UsageError(
+      `--protocol must be auto, legacy or a revision like ${FIRST_MODERN_REVISION}, got "${value}"`,
+    );
   }
-  throw new UsageError(
-    `--protocol must be auto, legacy or a revision like 2026-07-28, got "${value}"`,
-  );
+  // Revisions are ISO dates, so string order is chronological.
+  if (value < FIRST_MODERN_REVISION) {
+    throw new UsageError(
+      `--protocol ${value}: only revisions from ${FIRST_MODERN_REVISION} on can be pinned; use --protocol legacy for 2025-era servers`,
+    );
+  }
+  return { pin: value };
 }
 
-function parseTimeout(value: string | undefined): number {
+function describeMode(mode: ProtocolMode): string {
+  return typeof mode === 'string' ? mode : mode.pin;
+}
+
+/** The mode a baseline snapshot was negotiated with, when it records one. */
+function baselineMode(protocol: ProtocolInfo): ProtocolMode | undefined {
+  const { negotiation } = protocol;
+  return negotiation === 'pin' ? { pin: protocol.version } : negotiation;
+}
+
+function parseMilliseconds(value: string | undefined, flag: string): number | undefined {
   if (value === undefined) {
-    return DEFAULT_TIMEOUT_MS;
+    return undefined;
   }
   const timeout = Number(value);
   if (!Number.isInteger(timeout) || timeout <= 0) {
     throw new UsageError(
-      `--timeout must be a positive integer number of milliseconds, got "${value}"`,
+      `${flag} must be a positive integer number of milliseconds, got "${value}"`,
     );
   }
   return timeout;
@@ -283,11 +311,20 @@ function requireTarget(flags: ServerFlags, io: CliIo): ServerTarget {
   return target;
 }
 
-function connectOptions(flags: ServerFlags, io: CliIo): ConnectOptions {
+function connectOptions(
+  flags: ServerFlags,
+  io: CliIo,
+  fallback: ProtocolMode = 'auto',
+): ConnectOptions {
+  const probeTimeoutMs = parseMilliseconds(flags['probe-timeout'], '--probe-timeout');
   return {
-    protocol: parseProtocol(flags.protocol),
-    timeoutMs: parseTimeout(flags.timeout),
+    protocol: flags.protocol === undefined ? fallback : parseProtocol(flags.protocol),
+    timeoutMs: parseMilliseconds(flags.timeout, '--timeout') ?? DEFAULT_TIMEOUT_MS,
+    ...(probeTimeoutMs === undefined ? {} : { probeTimeoutMs }),
     ...(io.signal === undefined ? {} : { signal: io.signal }),
+    onDiagnostic: (message) => {
+      io.stderr(`mcp-contract: ${inertCommands(message)}\n`);
+    },
   };
 }
 
@@ -310,8 +347,32 @@ function outputFrom(flags: OutputFlags, io: CliIo): Output {
 async function appendStepSummary(io: CliIo, markdown: string): Promise<void> {
   const path = io.env.GITHUB_STEP_SUMMARY;
   if (path !== undefined && path !== '') {
-    await appendFile(path, `${markdown}\n`, 'utf8');
+    try {
+      await appendFile(path, `${markdown}\n`, 'utf8');
+    } catch (error) {
+      throw new OutputFileError(
+        path,
+        `cannot append the step summary (${errorCode(error) ?? describeError(error)})`,
+        { cause: error },
+      );
+    }
   }
+}
+
+/**
+ * The path GitHub expects in an annotation: relative to the repository root
+ * (`GITHUB_WORKSPACE`), with forward slashes. Files outside it get none.
+ */
+function annotationPath(io: CliIo, file: string): string | undefined {
+  const workspace = io.env.GITHUB_WORKSPACE;
+  if (workspace === undefined || workspace === '') {
+    return file;
+  }
+  const path = relative(workspace, resolve(io.cwd, file));
+  if (path === '' || path.startsWith('..') || isAbsolute(path)) {
+    return undefined;
+  }
+  return path.split(sep).join('/');
 }
 
 async function reportDiff(
@@ -329,8 +390,9 @@ async function reportDiff(
       io.stdout(formatDiffJson(result, { failOn }));
       break;
     case 'github':
-      io.stdout(formatDiffAnnotations(result, { file }));
-      io.stdout(formatDiffText(result, { failOn }));
+      io.stdout(formatDiffAnnotations(result, { file: annotationPath(io, file) }));
+      // The report repeats server-chosen names; they must not act as commands.
+      io.stdout(withoutWorkflowCommands(formatDiffText(result, { failOn })));
       await appendStepSummary(io, formatDiffMarkdown(result, { failOn }));
       break;
   }
@@ -419,10 +481,22 @@ async function checkCommand(args: readonly string[], io: CliIo): Promise<number>
     DEFAULT_FAIL_ON,
   );
   const target = requireTarget(values, io);
-  const options = connectOptions(values, io);
+  connectOptions(values, io); // Validate every flag before touching files or servers.
   const file = values.snapshot ?? DEFAULT_SNAPSHOT_FILE;
   // Read the baseline first: a missing file should not cost a server start.
   const baseline = await readSnapshot(resolve(io.cwd, file));
+  // Negotiate the way the baseline was negotiated, so revisions are comparable.
+  const recorded = baselineMode(baseline.protocol);
+  const options = connectOptions(values, io, recorded);
+  if (
+    recorded !== undefined &&
+    options.protocol !== undefined &&
+    describeMode(options.protocol) !== describeMode(recorded)
+  ) {
+    io.stderr(
+      `mcp-contract: ${file} was negotiated with --protocol ${describeMode(recorded)} and this run uses --protocol ${describeMode(options.protocol)}, so protocol revisions are not compared.\n`,
+    );
+  }
   const current = await snapshotServer(target, options);
   const code = await reportDiff(diffSnapshots(baseline, current), output, failOn, file, io);
   if (code !== ExitCode.Ok && output.format === 'text') {
@@ -466,8 +540,8 @@ async function testCommand(args: readonly string[], io: CliIo): Promise<number> 
       io.stdout(formatTestJson(results));
       break;
     case 'github':
-      io.stdout(formatTestAnnotations(results, { file }));
-      io.stdout(formatTestText(results));
+      io.stdout(formatTestAnnotations(results, { file: annotationPath(io, file) }));
+      io.stdout(withoutWorkflowCommands(formatTestText(results)));
       await appendStepSummary(io, formatTestMarkdown(results));
       break;
   }
@@ -475,30 +549,40 @@ async function testCommand(args: readonly string[], io: CliIo): Promise<number> 
 }
 
 function reportError(error: unknown, io: CliIo): number {
-  const interrupted = io.signal?.aborted === true;
+  // Server-provided text (error messages, stderr) must not turn into
+  // workflow commands when this runs in GitHub Actions.
+  const write = (text: string): void => {
+    io.stderr(inertCommands(text));
+  };
+  if (io.signal?.aborted === true) {
+    write('mcp-contract: interrupted\n');
+    return ExitCode.Interrupted;
+  }
   if (error instanceof McpContractError) {
-    io.stderr(`mcp-contract: ${error.message}\n`);
+    write(`mcp-contract: ${error.message}\n`);
     if (
       error instanceof ServerError &&
       error.serverStderr !== undefined &&
       error.serverStderr.trim() !== ''
     ) {
       const tail = error.serverStderr.trimEnd().split('\n').slice(-20);
-      io.stderr(
+      write(
         `server stderr (last ${tail.length} lines):\n${tail.map((line) => `  ${line}`).join('\n')}\n`,
       );
     }
-    return interrupted ? INTERRUPTED_EXIT_CODE : error.exitCode;
+    return error.exitCode;
   }
-  io.stderr(`mcp-contract: unexpected error: ${describeError(error)}\n`);
+  write(
+    `mcp-contract: internal error: ${describeError(error)}\nThis is a bug in mcp-contract; please report it at https://github.com/aozmekik/mcp-contract/issues${io.env.MCP_CONTRACT_DEBUG === undefined ? ' (set MCP_CONTRACT_DEBUG=1 to include the stack trace)' : ''}.\n`,
+  );
   if (
     io.env.MCP_CONTRACT_DEBUG !== undefined &&
     error instanceof Error &&
     error.stack !== undefined
   ) {
-    io.stderr(`${error.stack}\n`);
+    write(`${error.stack}\n`);
   }
-  return interrupted ? INTERRUPTED_EXIT_CODE : ExitCode.ServerError;
+  return ExitCode.InternalError;
 }
 
 /**
