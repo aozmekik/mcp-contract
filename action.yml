@@ -120,7 +120,7 @@ runs:
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_PROTOCOL: ${{ inputs.protocol }}
       run: |
-        # Inputs arrive through the environment, never through ${{ }} in the
+        # Inputs arrive through the environment, never through expression interpolation in the
         # script body, so they cannot inject shell code.
         set -euo pipefail
         trim() {
