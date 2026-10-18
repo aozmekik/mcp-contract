@@ -19,6 +19,29 @@ inputs:
     description: HTTP headers for url, one name=value per line.
     required: false
     default: ''
+  env:
+    description: >-
+      Environment variables for a stdio server, one per line: NAME copies the
+      variable from the job's environment (use this for secrets), NAME=value
+      sets it. The server gets only these plus a safe default set (PATH, HOME, ...).
+    required: false
+    default: ''
+  cwd:
+    description: Working directory of a stdio server (default working-directory).
+    required: false
+    default: ''
+  server-stderr:
+    description: "What to do with a stdio server's stderr: pipe (default; shown on failure), inherit or ignore."
+    required: false
+    default: ''
+  timeout:
+    description: Timeout per request in milliseconds (default 30000).
+    required: false
+    default: ''
+  probe-timeout:
+    description: Timeout of the server/discover protocol probe in milliseconds (default timeout).
+    required: false
+    default: ''
   snapshot:
     description: Committed baseline (check), output file (snapshot) or new snapshot (diff).
     required: false
@@ -36,17 +59,22 @@ inputs:
     required: false
     default: unknown
   protocol:
-    description: 'Protocol negotiation: auto (default), legacy, or a revision such as 2026-07-28.'
+    description: >-
+      Protocol negotiation: auto, legacy, or a revision such as 2026-07-28.
+      Default: auto, and for check the mode the baseline was taken with.
     required: false
-    default: auto
+    default: ''
   working-directory:
     description: Directory to run in; relative paths in other inputs are resolved against it.
     required: false
     default: .
   node-version:
-    description: Node.js version to set up. Set to an empty string to use the runner's Node.
+    description: >-
+      Node.js version to install with actions/setup-node. Empty (the default)
+      uses the job's Node.js, which must be 22.18 or newer. Setting it changes
+      the Node.js on PATH for the rest of the job.
     required: false
-    default: '24'
+    default: ''
 
 runs:
   using: composite
@@ -56,6 +84,16 @@ runs:
       uses: actions/setup-node@v7
       with:
         node-version: ${{ inputs.node-version }}
+
+    - name: Check the Node.js version
+      shell: bash
+      run: |
+        node -e '
+          const [major, minor] = process.versions.node.split(".").map(Number);
+          if (major < 22 || (major === 22 && minor < 18)) {
+            console.log(`::error title=mcp-contract::needs Node.js 22.18 or newer, found ${process.version}; run actions/setup-node first or set the node-version input`);
+            process.exit(1);
+          }'
 
     - name: Build mcp-contract
       shell: bash
@@ -71,6 +109,11 @@ runs:
         INPUT_STDIO: ${{ inputs.stdio }}
         INPUT_URL: ${{ inputs.url }}
         INPUT_HEADERS: ${{ inputs.headers }}
+        INPUT_ENV: ${{ inputs.env }}
+        INPUT_CWD: ${{ inputs.cwd }}
+        INPUT_SERVER_STDERR: ${{ inputs.server-stderr }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_PROBE_TIMEOUT: ${{ inputs.probe-timeout }}
         INPUT_SNAPSHOT: ${{ inputs.snapshot }}
         INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_SCENARIOS: ${{ inputs.scenarios }}
@@ -80,6 +123,11 @@ runs:
         # Inputs arrive through the environment, never through ${{ }} in the
         # script body, so they cannot inject shell code.
         set -euo pipefail
+        trim() {
+          local value="$1"
+          value="${value#"${value%%[![:space:]]*}"}"
+          printf '%s' "${value%"${value##*[![:space:]]}"}"
+        }
         args=("$INPUT_COMMAND")
         case "$INPUT_COMMAND" in
           check) args+=(--snapshot "$INPUT_SNAPSHOT" --fail-on "$INPUT_FAIL_ON" --format github) ;;
@@ -91,9 +139,18 @@ runs:
         if [[ "$INPUT_COMMAND" != diff ]]; then
           if [[ -n "$INPUT_STDIO" ]]; then args+=(--stdio "$INPUT_STDIO"); fi
           if [[ -n "$INPUT_URL" ]]; then args+=(--url "$INPUT_URL"); fi
-          while IFS= read -r header; do
+          while IFS= read -r line; do
+            header="$(trim "$line")"
             if [[ -n "$header" ]]; then args+=(--header "$header"); fi
           done <<< "$INPUT_HEADERS"
-          args+=(--protocol "$INPUT_PROTOCOL")
+          while IFS= read -r line; do
+            variable="$(trim "$line")"
+            if [[ -n "$variable" ]]; then args+=(--env "$variable"); fi
+          done <<< "$INPUT_ENV"
+          if [[ -n "$INPUT_CWD" ]]; then args+=(--cwd "$INPUT_CWD"); fi
+          if [[ -n "$INPUT_SERVER_STDERR" ]]; then args+=(--server-stderr "$INPUT_SERVER_STDERR"); fi
+          if [[ -n "$INPUT_TIMEOUT" ]]; then args+=(--timeout "$INPUT_TIMEOUT"); fi
+          if [[ -n "$INPUT_PROBE_TIMEOUT" ]]; then args+=(--probe-timeout "$INPUT_PROBE_TIMEOUT"); fi
+          if [[ -n "$INPUT_PROTOCOL" ]]; then args+=(--protocol "$INPUT_PROTOCOL"); fi
         fi
         node "$MCP_CONTRACT_CLI" "${args[@]}"

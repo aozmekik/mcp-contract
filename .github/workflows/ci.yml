@@ -21,6 +21,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: [22, 24]
+        include:
+          # The oldest supported release (package.json engines).
+          - os: ubuntu-latest
+            node: 22.18.0
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -75,3 +79,14 @@ jobs:
         run: |
           echo "::error::the check against v2 should have failed"
           exit 1
+      - name: Pass a job variable through to a stdio server
+        uses: ./
+        env:
+          MCP_CONTRACT_PID_FILE: ${{ runner.temp }}/fixture-pids.txt
+        with:
+          command: snapshot
+          stdio: node test/fixtures/fixture-server.ts
+          env: MCP_CONTRACT_PID_FILE
+          snapshot: ${{ runner.temp }}/fixture.snapshot.json
+      - name: Assert that the server saw the variable
+        run: test -s "$RUNNER_TEMP/fixture-pids.txt"
