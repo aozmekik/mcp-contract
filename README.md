@@ -282,8 +282,8 @@ Every export has TSDoc comments; see [`src/index.ts`](src/index.ts).
 
 ## GitHub Action
 
-The repository contains a composite action. It is not published on the GitHub Marketplace, and
-no release tag exists yet, so pin it to a commit SHA of this repository:
+The repository contains a composite action. It is not published on the GitHub Marketplace; pin it
+to a release tag, or to that tag's full commit SHA:
 
 ```yaml
 - uses: actions/checkout@v7
@@ -291,7 +291,7 @@ no release tag exists yet, so pin it to a commit SHA of this repository:
   with:
     node-version: 24
 - run: npm ci && npm run build # build your server
-- uses: aozmekik/mcp-contract@<commit-sha>
+- uses: aozmekik/mcp-contract@v0.1.0
   env:
     API_KEY: ${{ secrets.API_KEY }}
   with:
