@@ -28,7 +28,7 @@
   },
   "types": "./dist/index.d.ts",
   "bin": {
-    "mcp-contract": "./dist/cli.js"
+    "mcp-contract": "dist/cli.js"
   },
   "files": [
     "dist",
